@@ -75,7 +75,28 @@
     - `SchnorrTrickGadget::verify()` 204B。
   - 开销：一次 2 进 2 出的自复制花费约 53 万 varops，主要是一次 CHECKSIG 的 50 万，大约相当于 50 WU 的预算。
 
-### P4 vault
+### P4a vault 身份核心 —— 完成（2026-09-28），crate 为 `vault/`（`bitcoinl2-vault`）
+
+- **gadgets 新增两个模块**：
+  - `stack.rs`：带名字的栈模型，自动算 PICK/ROLL 深度，IF 分支结束后自动还原栈的顺序。
+  - `parse.rs`：`parse_tx` 把一个交易 blob 做规范解析，循环有上限。它校验单字节计数、空 scriptSig、单字节脚本长度、结尾恰好剩 4 字节 locktime，可选校验 sequence 和"禁止出现某个 spk"，取出 txid、in0、out0、第 k 个输出和最后一个输出。
+  - 测试：60 笔随机交易与 rust-bitcoin 逐字段一致；畸形输入全部被拒。上限 8/8 时脚本 891B。
+- **`vault/`**：
+  - `state.rs`：spec §6 的 envelope、应用状态 `acc ‖ mode`、裸 OP_RETURN caboose。
+  - `leaf.rs`：`transition_leaf` 按 spec §10 逐条实现：
+    - AUTH-1：SIGHASH_ALL 加 Schnorr trick；
+    - 格式与角色：LIN-1/2、CAB-1、原生 segwit；
+    - AUTH-2：规范解析 T，T.out0 == Spent(X,0)，T 的格式和唯一 P；
+    - 旧状态和新状态的 envelope 检查，以及 acc 规则；
+    - AUTH-3：规范解析 Q，k < n_out；
+    - AUTH-4：按 Q.output[k] 的 spk 选分支。延续分支要求 k == 0、ACTIVE、id 不变；创世分支要求 T 只有 1 个输入、旧状态是 GENESIS、id == txid(T)。
+  - `tx.rs`：构造创世交易和迁移交易。Schnorr trick 需要调整时改的是 caboose 的随机数 r，这正是 spec CAB-3 设计 r 的用途。
+- **测试 `vault/tests/identity.rs`**：10 项全部通过，覆盖 G01–G10、L02/L04/L06、A01/A04/A06、E04、acc、mode、金额守恒、唯一后继（双花被拒）。每个反例都是只改诚实 plan 的一个字段。
+- **大小**：leaf 2,306B；一次迁移交易 4,307 WU（1,077 vB），执行约 64 万 varops。
+- **暴露出的约束**（相当于 spec RES-2 在 GSR 下的版本）：被反射的 T 和 Q 最多 8 个输入、8 个输出，scriptSig 为空，输出脚本短于 253 字节。这也包括创世的出资交易，也就是创世分支里的 Q。
+- **P4a 的简化，留给 P4b**：只有一种交易模板（in `[vault, fee]`、out `[vault, change, caboose]`）；金额不变；Init、First 和出资来源谓词都接受任意值。
+
+### P4b vault 应用迁移（下一步）
 
 - 按 spec v0.1.0 加上已定的偏离：
   - envelope 格式不变；`app_root = H(acc ‖ mode ‖ 模式相关数据)`。

@@ -1,0 +1,16 @@
+[package]
+name = "bitcoinl2-vault"
+version = "0.1.0"
+edition = "2021"
+description = "UTXO linearization vault (draft v0.1.0) in tapscript v2"
+
+[dependencies]
+bitcoin = { version = "0.32.0", features = ["rand"] }
+bitcoin-scriptexec = { path = "../scriptexec" }
+gsr-gadgets = { path = "../gadgets" }
+sha2 = "0.10.8"
+anyhow = "1.0.86"
+
+[dev-dependencies]
+hex = "0.4"
+bitcoin-simulator = { path = "../simulator" }

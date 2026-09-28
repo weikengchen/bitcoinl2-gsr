@@ -148,6 +148,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoinl2-vault"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "bitcoin-scriptexec",
+ "bitcoin-simulator",
+ "gsr-gadgets",
+ "hex",
+ "sha2",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

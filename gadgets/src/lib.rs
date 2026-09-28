@@ -21,9 +21,11 @@ pub(crate) mod treepp {
 }
 
 pub mod leaf;
+pub mod parse;
 pub mod pseudo;
 pub mod schnorr;
 pub mod sighash;
+pub mod stack;
 pub mod tagged_hash;
 pub mod tx;
 

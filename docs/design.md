@@ -67,6 +67,11 @@ spec 副本在 `docs/spec/utxo-linearization-v0.1.0-en/`，来源见 §9。
 - 内省：SIGHASH_ALL（0x01，不带 ACP），ext_flag = 1，无 annex，codesep_pos = 0xffffffff，使用 G/G Schnorr trick（pubkey = R = G）。
 - 金额：旧余额取 Spent(X,0).value，新余额取 X.output[0].value。每一项增减都必须有授权（VALUE-1..3）。
 
+### 4.2.1 被反射交易的资源约束（P4a 实现时确定，2026-09-28）
+
+- 父交易 T 和祖父交易 Q 通过规范解析读取，最多 8 个输入、8 个输出；scriptSig 必须为空；计数和输出脚本长度都用单字节 compact size 表示，也就是脚本短于 253 字节。
+- 这同样约束创世交易的出资交易（创世分支里的 Q）：出资方可能需要先准备一笔满足条件的交易。GSR 下已经没有 520 字节的限制，所以 R1 只剩下这几条结构性约束。
+
 ### 4.3 与 spec 的偏离
 
 1. **（已定）caboose 用裸 OP_RETURN 输出，不用 P2WSH 包装**：`scriptPubKey = 6a 24 ‖ H(state) ‖ LE32(r)`，共 38B，金额 0。
