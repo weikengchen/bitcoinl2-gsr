@@ -116,8 +116,8 @@ fn first_transition_identity() {
     w.check(&ok).unwrap();
 }
 
-/// G08, acc rule, mode, parameters: a continuation keeps the id, follows the acc
-/// rule and keeps the mode and parameters. (E04 holds by construction: the leaf
+/// G08, acc rule, mode, L2 root, parameters: a continuation keeps the id,
+/// follows the acc rule and keeps the mode, the L2 state root and the parameters. (E04 holds by construction: the leaf
 /// builds the new state instead of taking it as a hint.)
 #[test]
 fn continuation_rules() {
@@ -140,6 +140,10 @@ fn continuation_rules() {
     let lock = Lock { height: 0, bond: 0, locker: [0; 32], refund_hash: [0; 32] };
     bad_mode.set_app(AppState { mode: Mode::Verifying(lock), ..bad_mode.new_app });
     assert!(w.check(&bad_mode).is_err());
+
+    let mut bad_root = honest(&mut w);
+    bad_root.set_app(AppState { l2_root: [0x03; 32], ..bad_root.new_app });
+    assert!(w.check(&bad_root).is_err());
 
     let mut bad_params = honest(&mut w);
     bad_params.set_app(AppState { params: Params { b_min: 1, n: 1 }, ..bad_params.new_app });

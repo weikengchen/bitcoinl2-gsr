@@ -1,7 +1,8 @@
 //! The vault's tapscript v2 leaves. Each leaf enforces the whole protocol
 //! (spec ENV-2) for one kind of transaction.
 
-use crate::state::{AppState, ENVELOPE_VERSION, MAGIC, MODE_NORMAL, MODE_VERIFYING, PHASE_ACTIVE};
+use crate::da::CHAIN_END;
+use crate::state::{app_offset as off, AppState, ENVELOPE_VERSION, MAGIC, MODE_NORMAL, MODE_VERIFYING, PHASE_ACTIVE};
 use bitcoin::absolute::LOCK_TIME_THRESHOLD;
 use bitcoin::consensus::serialize;
 use bitcoin::opcodes::all::*;
@@ -136,7 +137,7 @@ pub(crate) fn caboose_hash(s: &mut Stk, out: &str, as_: &str) {
 /// | `Plain` | NORMAL -> NORMAL | - | unchanged | 0 |
 /// | `Fold(j)` | NORMAL -> NORMAL | aggregator OP_RETURN | + deposits | 0 |
 /// | `Lock` | NORMAL -> VERIFYING | - | + bond (>= B_min) | h |
-/// | `Complete` | VERIFYING -> NORMAL | b, OP_RETURN(R \|\| H(list)), refund | - W - bond | 0 |
+/// | `Complete` | VERIFYING -> NORMAL | b, OP_RETURN(R \|\| H), refund | - W - bond | 0 |
 /// | `Timeout` | VERIFYING -> NORMAL | - | unchanged | >= h + N |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -189,8 +190,8 @@ pub struct VaultConfig {
 ///
 /// Hints, in order: SIGHASH_ALL data of the transaction, the two Schnorr-trick
 /// hints, the parent T, the old state S, the old application state A, the
-/// kind's own hints (a lock: its data; a completion: the new parameters, the
-/// withdrawal list and the operator's signature), and the grandparent Q.
+/// kind's own hints (a lock: its data; a completion: the new L2 state root and
+/// parameters, the DA data and the operator's signature), and the grandparent Q.
 /// The new state is not a hint: the leaf builds it and checks that the caboose
 /// commits to it.
 pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
@@ -250,13 +251,13 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
             spk_of_output(&mut s, "x.out2", "_b_spk");
             s.push_data(&serialize(&cfg.b_spk), "_c");
             s.apply(op(OP_EQUALVERIFY), 2, &[]);
-            // out3: OP_RETURN PUSHBYTES_64 <R || H(list)>
+            // out3: OP_RETURN PUSHBYTES_64 <R || H>, H the DA commitment
             spk_of_output(&mut s, "x.out3", "_opr");
             size_eq(&mut s, "_opr", 67);
             left(&mut s, "_opr", 3, "_pfx");
             s.push_data(&[0x42, 0x6a, 0x40], "_c");
             s.apply(op(OP_EQUALVERIFY), 2, &[]);
-            right(&mut s, "_opr", 32, "list_hash");
+            right(&mut s, "_opr", 32, "da_hash");
             // out4: the bond refund; not a second main program, which would
             // make the next transition's parse of this transaction fail
             spk_of_output(&mut s, "x.out4", "refund_spk");
@@ -308,7 +309,7 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
     right(&mut s, "S", 32, "root");
 
     // The old application state A, in the mode this kind starts from:
-    // acc || mode || B_min || N || [h || bond || locker || refund hash].
+    // acc || mode || l2_root || B_min || N || [h || bond || locker || refund hash].
     s.gadget(OP_HINT(), 0, &["A"]);
     let old_len = match kind.old_mode() {
         MODE_NORMAL => AppState::NORMAL_LEN,
@@ -318,7 +319,7 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
     sha256(&mut s, "A", "_h");
     eq(&mut s, "_h", "root");
     s.drop("_h");
-    substr(&mut s, "A", 32, 1, "_mode");
+    substr(&mut s, "A", off::MODE, 1, "_mode");
     s.push_data(&[kind.old_mode()], "_c");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
     left(&mut s, "A", 32, "acc");
@@ -339,7 +340,7 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
             }
             s.pick("new_amount", "_n");
             s.apply(op(OP_NUMEQUALVERIFY), 2, &[]);
-            right(&mut s, "A", 13, "tail2");
+            right(&mut s, "A", AppState::NORMAL_LEN - off::MODE, "tail2");
         }
         Kind::Lock => {
             // the locker's data: bond || locker's L2 address || refund hash
@@ -352,11 +353,11 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
             s.pick("new_amount", "_n");
             s.apply(op(OP_NUMEQUALVERIFY), 2, &[]);
             s.pick("bond", "_b");
-            substr(&mut s, "A", 33, 8, "_b_min");
+            substr(&mut s, "A", off::B_MIN, 8, "_b_min");
             s.apply(ops(&[OP_GREATERTHANOREQUAL, OP_VERIFY]), 2, &[]);
-            // VERIFYING || params || h (= nLockTime) || data
+            // VERIFYING || l2_root || params || h (= nLockTime) || data
             s.push_data(&[MODE_VERIFYING], "tail2");
-            right(&mut s, "A", 12, "_p");
+            right(&mut s, "A", AppState::NORMAL_LEN - off::L2_ROOT, "_p");
             s.apply(op(OP_CAT), 2, &["tail2"]);
             s.pick("x.lt", "_h");
             s.apply(op(OP_CAT), 2, &["tail2"]);
@@ -364,20 +365,23 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
             s.apply(op(OP_CAT), 2, &["tail2"]);
         }
         Kind::Complete => {
-            // the new parameters, set by the proof
-            s.gadget(OP_HINT(), 0, &["params2"]);
-            size_eq(&mut s, "params2", 12);
-            // DA: the withdrawal list is published in this witness
-            s.gadget(OP_HINT(), 0, &["list"]);
-            sha256(&mut s, "list", "_h");
-            s.pick("list_hash", "_x");
+            // the new L2 state root and parameters, set by the proof
+            s.gadget(OP_HINT(), 0, &["proof2"]);
+            size_eq(&mut s, "proof2", (AppState::NORMAL_LEN - off::L2_ROOT) as u64);
+            // DA: the data is published in this witness as one chunk, so
+            // H = SHA256(data || CHAIN_END)
+            s.gadget(OP_HINT(), 0, &["da"]);
+            s.pick("da", "_x");
+            s.push_data(&CHAIN_END, "_e");
+            s.apply(ops(&[OP_CAT, OP_SHA256]), 2, &["_h"]);
+            s.pick("da_hash", "_x");
             s.apply(op(OP_EQUALVERIFY), 2, &[]);
             // Placeholder for the proof verifier: the operator signs this transaction.
             s.gadget(OP_HINT(), 0, &["sig"]);
             s.push_data(&cfg.operator.serialize(), "_k");
             s.apply(op(OP_CHECKSIGVERIFY), 2, &[]);
             // new amount + W + bond == old amount
-            substr(&mut s, "A", 49, 8, "bond");
+            substr(&mut s, "A", off::BOND, 8, "bond");
             s.pick("new_amount", "_sum");
             left(&mut s, "x.out2", 8, "_w");
             s.apply(op(OP_ADD), 2, &["_sum"]);
@@ -392,24 +396,24 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
             sha256(&mut s, "refund_spk", "_h");
             right(&mut s, "A", 32, "_rh");
             s.apply(op(OP_EQUALVERIFY), 2, &[]);
-            // NORMAL || params'
+            // NORMAL || l2_root' || params'
             s.push_data(&[MODE_NORMAL], "tail2");
-            s.pick("params2", "_p");
+            s.pick("proof2", "_p");
             s.apply(op(OP_CAT), 2, &["tail2"]);
         }
         Kind::Timeout => {
             // nLockTime >= h + N: from height h + N anyone may time the lock out
-            substr(&mut s, "A", 45, 4, "_t");
-            substr(&mut s, "A", 41, 4, "_n");
+            substr(&mut s, "A", off::HEIGHT, 4, "_t");
+            substr(&mut s, "A", off::N, 4, "_n");
             s.apply(op(OP_ADD), 2, &["_t"]);
             s.apply(ops(&[OP_CLTV, OP_DROP]), 1, &[]);
             // the bond stays in the vault
             s.pick("x.am0", "_a");
             s.pick("new_amount", "_n");
             s.apply(op(OP_NUMEQUALVERIFY), 2, &[]);
-            // NORMAL || params
+            // NORMAL || l2_root || params
             s.push_data(&[MODE_NORMAL], "tail2");
-            substr(&mut s, "A", 33, 12, "_p");
+            substr(&mut s, "A", off::L2_ROOT, AppState::NORMAL_LEN - off::L2_ROOT, "_p");
             s.apply(op(OP_CAT), 2, &["tail2"]);
         }
     }

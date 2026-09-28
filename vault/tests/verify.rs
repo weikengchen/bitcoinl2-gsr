@@ -9,7 +9,8 @@ use bitcoin::key::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{Amount, ScriptBuf, TxOut};
 use bitcoinl2_vault::state::{AppState, Lock, Mode, Params};
-use bitcoinl2_vault::tx::{Plan, Vault, Withdrawal};
+use bitcoinl2_vault::da::{Change, DaData};
+use bitcoinl2_vault::tx::{Batch, Plan, Vault};
 use common::{deposit, rejects, Line, World};
 
 /// Lock height (the lock transaction's nLockTime).
@@ -22,9 +23,20 @@ fn refund(w: &World) -> ScriptBuf {
     w.wallet.spk()
 }
 
-/// A batch of three 43-byte withdrawals paying 5,000 sats in total.
-fn withdrawal() -> Withdrawal {
-    Withdrawal { amount: Amount::from_sat(5_000), root: [0x52; 32], list: vec![0x57; 3 * 43] }
+/// A proven batch: 5,000 sats to program b (a stand-in split root), DA data
+/// with two withdrawals and three changed accounts, a new L2 state root.
+fn batch() -> Batch {
+    let payout = |sats| TxOut { value: Amount::from_sat(sats), script_pubkey: ScriptBuf::from_bytes(vec![0x51]) };
+    let da = DaData {
+        withdrawals: vec![payout(2_000), payout(2_500)],
+        new_accounts: vec![[0x61; 32]],
+        changes: vec![
+            Change { index: 0, balance: 7_000, nonce: 3 },
+            Change { index: 5, balance: 0, nonce: 9 },
+            Change { index: 6, balance: 1_000, nonce: 0 },
+        ],
+    };
+    Batch { amount: Amount::from_sat(5_000), root: [0x52; 32], da: da.encode(), l2_root: [0x5f; 32], params: new_params() }
 }
 
 fn new_params() -> Params {
@@ -56,7 +68,7 @@ fn locked(w: &mut World) -> Line {
 fn complete_plan(w: &mut World, line: &Line) -> Plan {
     let p = line.plan(w, vec![]);
     let refund = refund(w);
-    w.vault.complete(p, &withdrawal(), refund, new_params())
+    w.vault.complete(p, &batch(), refund)
 }
 
 /// Lock, complete (withdraw, refund the bond, new parameters), and carry on.
@@ -80,6 +92,7 @@ fn lock_then_complete() {
     assert_eq!(x.output[4], TxOut { value: Amount::from_sat(BOND), script_pubkey: refund(&w) });
     assert_eq!(line.app.mode, Mode::Normal);
     assert_eq!(line.app.params, new_params());
+    assert_eq!(line.app.l2_root, batch().l2_root);
 
     // the vault carries on: a fold, then a lock under the new B_min
     let d = deposit(&mut w, &line.a, &[10_000]);
@@ -151,7 +164,7 @@ fn locked_vault_is_frozen() {
     let mut p = normal.plan(&mut w, vec![]);
     let fake = Lock { height: H, bond: 1_000, locker: LOCKER, refund_hash: [0; 32] };
     p.set_app(AppState { mode: Mode::Verifying(fake), ..p.new_app });
-    let p = w.vault.complete(p, &withdrawal(), refund(&w), new_params());
+    let p = w.vault.complete(p, &batch(), refund(&w));
     let tx = Line::build(&w, &normal.a, &p);
     rejects(&tx, &Vault::prevouts(&p), 0, "NumEqualVerify");
 }
@@ -181,7 +194,7 @@ fn complete_rules() {
     let mut p = complete_plan(&mut w, &line);
     p.extra_outputs[0].script_pubkey = w.wallet.spk();
     check(&w, &p, "EqualVerify");
-    // the published list is the one the OP_RETURN commits to
+    // the published DA data is the one the OP_RETURN commits to
     let mut p = complete_plan(&mut w, &line);
     p.hints.extra[1] = vec![0x58; 3 * 43];
     check(&w, &p, "EqualVerify");
@@ -195,7 +208,7 @@ fn complete_rules() {
     check(&w, &p, "EqualVerify");
     // ... to the recorded refund address
     let p = line.plan(&mut w, vec![]);
-    let p = w.vault.complete(p, &withdrawal(), w.b.script_pubkey(), new_params());
+    let p = w.vault.complete(p, &batch(), w.b.script_pubkey());
     check(&w, &p, "EqualVerify");
 }
 
@@ -212,7 +225,7 @@ fn refund_to_the_vault_is_rejected() {
     line.accept(&w, &p);
 
     let p = line.plan(&mut w, vec![]);
-    let p = w.vault.complete(p, &withdrawal(), vault_spk, new_params());
+    let p = w.vault.complete(p, &batch(), vault_spk);
     let tx = Line::build(&w, &line.a, &p);
     rejects(&tx, &Vault::prevouts(&p), 0, "Verify");
 
@@ -256,6 +269,11 @@ fn timeout() {
     params.set_app(AppState { params: new_params(), ..params.new_app });
     let tx = Line::build(&w, &line.a, &params);
     rejects(&tx, &Vault::prevouts(&params), 0, "EqualVerify");
+    let p = line.plan(&mut w, vec![]);
+    let mut root = w.vault.timeout(p, H + n);
+    root.set_app(AppState { l2_root: [0x03; 32], ..root.new_app });
+    let tx = Line::build(&w, &line.a, &root);
+    rejects(&tx, &Vault::prevouts(&root), 0, "EqualVerify");
 
     let p = line.plan(&mut w, vec![]);
     let p = w.vault.timeout(p, H + n);

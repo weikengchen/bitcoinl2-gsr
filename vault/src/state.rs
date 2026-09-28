@@ -109,18 +109,34 @@ pub enum Mode {
     Verifying(Lock),
 }
 
+/// Byte offsets of the fields of an encoded [AppState].
+pub mod app_offset {
+    pub const MODE: usize = 32;
+    pub const L2_ROOT: usize = 33;
+    pub const B_MIN: usize = 65;
+    pub const N: usize = 73;
+    pub const HEIGHT: usize = 77;
+    pub const BOND: usize = 81;
+    pub const LOCKER: usize = 89;
+    pub const REFUND_HASH: usize = 121;
+}
+
 /// The application state committed by `app_root`:
-/// `acc || mode || params`, followed in VERIFYING mode by `LE32(height) || lock data`.
+/// `acc || mode || l2_root || params`, followed in VERIFYING mode by
+/// `LE32(height) || lock data`. Only a completed verification changes
+/// `l2_root` and `params`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppState {
     pub acc: [u8; 32],
+    /// S: root of the L2 state (the accounts), set by the proofs.
+    pub l2_root: [u8; 32],
     pub params: Params,
     pub mode: Mode,
 }
 
 impl AppState {
-    pub const NORMAL_LEN: usize = 45;
-    pub const VERIFYING_LEN: usize = 121;
+    pub const NORMAL_LEN: usize = 77;
+    pub const VERIFYING_LEN: usize = 153;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut v = self.acc.to_vec();
@@ -128,6 +144,7 @@ impl AppState {
             Mode::Normal => v.push(MODE_NORMAL),
             Mode::Verifying(_) => v.push(MODE_VERIFYING),
         }
+        v.extend(self.l2_root);
         v.extend(self.params.encode());
         if let Mode::Verifying(lock) = self.mode {
             v.extend(lock.height.to_le_bytes());

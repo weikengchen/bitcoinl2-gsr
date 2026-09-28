@@ -7,8 +7,9 @@ mod common;
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, WPubkeyHash};
+use bitcoinl2_vault::da::{chain_hash, Change, DaData};
 use bitcoinl2_vault::program_b::{pieces, BLeaf, ProgramB, SplitTree};
-use bitcoinl2_vault::state::sha256;
+use bitcoinl2_vault::tx::Batch;
 use common::{deposit, rejects, Line, Wallet, World};
 use gsr_gadgets::sighash::SighashAllData;
 
@@ -27,8 +28,18 @@ fn tree(w: &World, n: usize) -> SplitTree {
     SplitTree::new(&payouts(n), FAN_OUT, FEE, &w.b.script_pubkey())
 }
 
-/// A vault funded by deposits, locked at H and completed with `tree`: the completion.
-fn complete(w: &mut World, tree: &SplitTree) -> Transaction {
+/// DA data paying `payouts`, with a couple of changed accounts.
+fn da(payouts: &[TxOut]) -> DaData {
+    DaData {
+        withdrawals: payouts.to_vec(),
+        new_accounts: vec![],
+        changes: vec![Change { index: 1, balance: 0, nonce: 4 }, Change { index: 2, balance: 9_000, nonce: 1 }],
+    }
+}
+
+/// A vault funded by deposits, locked at H and completed with `tree` and the
+/// DA data `da`: the completion.
+fn complete(w: &mut World, tree: &SplitTree, da: &DaData) -> Transaction {
     let mut line = Line::new(w);
     let mut d = deposit(w, &line.a, &[90_000]);
     d.extend(deposit(w, &line.a, &[90_000]));
@@ -40,7 +51,14 @@ fn complete(w: &mut World, tree: &SplitTree) -> Transaction {
     p.change.value -= Amount::from_sat(20_000);
     line.accept(w, &p);
     let p = line.plan(w, vec![]);
-    let p = w.vault.complete(p, &tree.withdrawal(), w.wallet.spk(), World::app0().params);
+    let batch = Batch {
+        amount: tree.root().value,
+        root: tree.root().root(),
+        da: da.encode(),
+        l2_root: [0x5f; 32],
+        params: World::app0().params,
+    };
+    let p = w.vault.complete(p, &batch, w.wallet.spk());
     line.accept(w, &p)
 }
 
@@ -69,7 +87,7 @@ fn withdraw_end_to_end() {
     let mut w = World::new(0);
     let t = tree(&w, 20);
     assert_eq!(t.nodes.len(), 8); // 5 leaves, 2 internal nodes, the root
-    let x = complete(&mut w, &t);
+    let x = complete(&mut w, &t, &da(&payouts(20)));
     assert_eq!(x.output[2], TxOut { value: t.root().value, script_pubkey: w.b.script_pubkey() });
     let mut paid = vec![];
     for s in run(&w, &t, t.nodes.len() - 1, &x, 2, &mut paid) {
@@ -80,7 +98,7 @@ fn withdraw_end_to_end() {
     // one level: the root pays the recipients directly
     let mut w = World::new(0);
     let t = tree(&w, 3);
-    let x = complete(&mut w, &t);
+    let x = complete(&mut w, &t, &da(&payouts(3)));
     let mut paid = vec![];
     run(&w, &t, 0, &x, 2, &mut paid);
     assert_eq!(paid, payouts(3));
@@ -98,7 +116,7 @@ fn split_sizes() {
     };
     let payouts: Vec<TxOut> = (0..256).map(|i| TxOut { value: Amount::from_sat(330), script_pubkey: spk(i) }).collect();
     let t = SplitTree::new(&payouts, 16, FEE, &w.b.script_pubkey());
-    let x = complete(&mut w, &t);
+    let x = complete(&mut w, &t, &da(&payouts));
     let mut paid = vec![];
     let splits = run(&w, &t, t.nodes.len() - 1, &x, 2, &mut paid);
     assert_eq!(paid, payouts);
@@ -112,17 +130,21 @@ fn split_sizes() {
     );
 }
 
-/// DA: the list is in the completion's witness, and the tree rebuilt from it
-/// has the root the completion committed to.
+/// DA: the data is in the completion's witness under the committed H; it
+/// decodes to the batch's data, and the split tree rebuilt from its
+/// withdrawal list has the root the completion committed to.
 #[test]
-fn tree_is_rebuilt_from_the_published_list() {
+fn tree_is_rebuilt_from_the_published_data() {
     let mut w = World::new(0);
     let t = tree(&w, 20);
-    let x = complete(&mut w, &t);
+    let published = da(&payouts(20));
+    let x = complete(&mut w, &t, &published);
     let committed = &x.output[3].script_pubkey.as_bytes()[2..]; // OP_RETURN PUSHBYTES_64
-    let (root, list_hash) = committed.split_at(32);
-    let list = x.input[0].witness.iter().find(|e| sha256(e) == list_hash).expect("the list is in the witness");
-    let rebuilt = SplitTree::from_list(list, FAN_OUT, FEE, &w.b.script_pubkey()).unwrap();
+    let (root, h) = committed.split_at(32);
+    let data = x.input[0].witness.iter().find(|e| chain_hash(&[e]) == h).expect("the DA data is in the witness");
+    let data = DaData::decode(data).unwrap();
+    assert_eq!(data, published);
+    let rebuilt = SplitTree::from_da(&data, FAN_OUT, FEE, &w.b.script_pubkey());
     assert_eq!(rebuilt.root().root(), root);
     assert_eq!(rebuilt.root().value, x.output[2].value);
 }
@@ -149,7 +171,7 @@ fn forged(w: &World, parent: &Transaction, vout: usize, outputs: &[TxOut], claim
 fn split_rules() {
     let mut w = World::new(0);
     let t = tree(&w, 20);
-    let x = complete(&mut w, &t);
+    let x = complete(&mut w, &t, &da(&payouts(20)));
     let root = t.root();
     let prevout = |p: &Transaction, v: usize| vec![p.output[v].clone()];
 

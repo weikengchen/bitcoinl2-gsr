@@ -94,7 +94,7 @@ impl World {
     }
 
     pub fn app0() -> AppState {
-        AppState { acc: [0xab; 32], params: Params { b_min: 10_000, n: 144 }, mode: Mode::Normal }
+        AppState { acc: [0xab; 32], l2_root: [0x5e; 32], params: Params { b_min: 10_000, n: 144 }, mode: Mode::Normal }
     }
 
     /// T0 funded by one coin: `[P(20,000), change, caboose]`.

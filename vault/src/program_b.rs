@@ -9,7 +9,7 @@
 //!
 //! R is read from the parent, in the data output right after the spent b:
 //! - the root b, created by the vault's completion, is followed by
-//!   `OP_RETURN PUSHBYTES_64 <R || H(list)>` (the "root" leaf parses the parent);
+//!   `OP_RETURN PUSHBYTES_64 <R || H>` (the "root" leaf parses the parent);
 //! - a b created by a split is followed by `OP_RETURN PUSHBYTES_32 <R>`. A split
 //!   of an internal node has outputs `[b_1, D_1, b_2, D_2, ...]`, all 43 bytes,
 //!   so the "internal" leaf finds them at fixed offsets without parsing.
@@ -19,10 +19,11 @@
 
 use crate::leaf::{left, op, ops, right, size_eq, substr, MAX_INPUTS, MAX_OUTPUTS, TX_VERSION};
 use crate::state::sha256;
-use crate::tx::{input, op_return, Withdrawal};
-use anyhow::{ensure, Result};
+use crate::da::DaData;
+use crate::tx::{input, op_return};
+use anyhow::Result;
 use bitcoin::absolute::LockTime;
-use bitcoin::consensus::{deserialize_partial, serialize};
+use bitcoin::consensus::serialize;
 use bitcoin::opcodes::all::*;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Witness};
@@ -104,7 +105,7 @@ pub fn root_leaf() -> Script {
     left(&mut s, "op", 32, "_ptxid");
     s.pick("t.txid", "_x");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
-    // 8-byte amount || 0x42 || OP_RETURN PUSHBYTES_64 || R || H(list)
+    // 8-byte amount || 0x42 || OP_RETURN PUSHBYTES_64 || R || H
     size_eq(&mut s, "t.out_k", 75);
     substr(&mut s, "t.out_k", 8, 3, "_pfx");
     s.push_data(&[0x42, 0x6a, 0x40], "_c");
@@ -199,13 +200,11 @@ impl Node {
 /// A withdrawal batch laid out as a tree of splits (design §7): leaves pay
 /// up to `fan_out` recipients, internal nodes fund up to `fan_out` children,
 /// and every split pays `fee`. The layout is canonical, so anyone can rebuild
-/// it from the published list.
+/// it from the withdrawal list in the published DA data.
 #[derive(Clone, Debug)]
 pub struct SplitTree {
     /// Children before parents; the last node is the root.
     pub nodes: Vec<Node>,
-    /// The payouts, serialized back to back: the list published by the completion.
-    pub list: Vec<u8>,
 }
 
 impl SplitTree {
@@ -232,30 +231,16 @@ impl SplitTree {
             }
             level = next;
         }
-        let list = payouts.iter().flat_map(serialize).collect();
-        SplitTree { nodes, list }
+        SplitTree { nodes }
     }
 
-    /// Rebuild the tree from a published list.
-    pub fn from_list(list: &[u8], fan_out: usize, fee: Amount, b_spk: &ScriptBuf) -> Result<Self> {
-        let mut payouts = vec![];
-        let mut rest = list;
-        while !rest.is_empty() {
-            let (o, used): (TxOut, usize) = deserialize_partial(rest)?;
-            payouts.push(o);
-            rest = &rest[used..];
-        }
-        ensure!(!payouts.is_empty(), "empty list");
-        Ok(Self::new(&payouts, fan_out, fee, b_spk))
+    /// Rebuild the tree from published DA data.
+    pub fn from_da(da: &DaData, fan_out: usize, fee: Amount, b_spk: &ScriptBuf) -> Self {
+        Self::new(&da.withdrawals, fan_out, fee, b_spk)
     }
 
     pub fn root(&self) -> &Node {
         self.nodes.last().expect("a tree has a root")
-    }
-
-    /// What the vault's completion pays out and publishes.
-    pub fn withdrawal(&self) -> Withdrawal {
-        Withdrawal { amount: self.root().value, root: self.root().root(), list: self.list.clone() }
     }
 }
 

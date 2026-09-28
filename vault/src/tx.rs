@@ -1,5 +1,6 @@
 //! Building vault transactions and their witnesses.
 
+use crate::da::chain_hash;
 use crate::leaf::{vault_leaf, Kind, VaultConfig, SEQUENCE};
 use crate::state::{caboose, sha256, AppState, Lock, Mode, Params, Phase, State};
 use anyhow::{bail, Result};
@@ -40,18 +41,23 @@ pub struct TransitionHints {
     pub parent: Vec<u8>,
     pub old_state: Vec<u8>,
     pub old_app: Vec<u8>,
-    /// The kind's own hints: a lock's data; a completion's new parameters and withdrawal list.
+    /// The kind's own hints: a lock's data; a completion's new L2 state root and
+    /// parameters, and its DA data.
     pub extra: Vec<Vec<u8>>,
     pub grandparent: Vec<u8>,
 }
 
-/// A withdrawal batch (design §7): `amount` goes to program b, whose Merkle-sum
-/// root is `root`; `list` is published in the completion's witness.
+/// What a proof establishes and a completion carries out (design §7):
+/// `amount` goes to program b, whose split tree has root `root`; the DA data
+/// `da` is published in the completion's witness (one chunk); the L2 state
+/// root and the parameters become `l2_root` and `params`.
 #[derive(Clone, Debug)]
-pub struct Withdrawal {
+pub struct Batch {
     pub amount: Amount,
     pub root: [u8; 32],
-    pub list: Vec<u8>,
+    pub da: Vec<u8>,
+    pub l2_root: [u8; 32],
+    pub params: Params,
 }
 
 /// Everything needed to build a vault transaction; tests tamper with it.
@@ -193,22 +199,25 @@ impl Vault {
         plan
     }
 
-    /// Complete a verification: pay `withdrawal` to program b, refund the bond
-    /// to `refund` (whose hash the lock recorded) and set the new `params`.
-    pub fn complete(&self, mut plan: Plan, withdrawal: &Withdrawal, refund: ScriptBuf, params: Params) -> Plan {
+    /// Complete a verification with `batch`: pay out to program b, publish the
+    /// DA data, refund the bond to `refund` (whose hash the lock recorded), and
+    /// set the new L2 state root and parameters.
+    pub fn complete(&self, mut plan: Plan, batch: &Batch, refund: ScriptBuf) -> Plan {
         let Mode::Verifying(lock) = plan.new_app.mode else { panic!("the vault is not locked") };
         let bond = Amount::from_sat(lock.bond);
         plan.kind = Kind::Complete;
-        plan.successor.value = plan.successor.value - withdrawal.amount - bond;
-        let mut data = withdrawal.root.to_vec();
-        data.extend(sha256(&withdrawal.list));
+        plan.successor.value = plan.successor.value - batch.amount - bond;
+        let mut data = batch.root.to_vec();
+        data.extend(chain_hash(&[&batch.da]));
         plan.extra_outputs = vec![
-            TxOut { value: withdrawal.amount, script_pubkey: self.config.b_spk.clone() },
+            TxOut { value: batch.amount, script_pubkey: self.config.b_spk.clone() },
             op_return(data),
             TxOut { value: bond, script_pubkey: refund },
         ];
-        plan.hints.extra = vec![params.encode(), withdrawal.list.clone()];
-        plan.set_app(AppState { params, mode: Mode::Normal, ..plan.new_app });
+        let mut proof = batch.l2_root.to_vec();
+        proof.extend(batch.params.encode());
+        plan.hints.extra = vec![proof, batch.da.clone()];
+        plan.set_app(AppState { l2_root: batch.l2_root, params: batch.params, mode: Mode::Normal, ..plan.new_app });
         plan
     }
 
