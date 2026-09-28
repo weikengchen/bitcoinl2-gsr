@@ -2,6 +2,7 @@
 name = "bitcoinl2-vault"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "UTXO linearization vault (draft v0.1.0) in tapscript v2"
 
 [dependencies]

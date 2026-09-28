@@ -35,3 +35,8 @@ BIP 440/441 reference implementation, jmoik/bitcoin `gsr-inquisition` at
 ```sh
 cargo test
 ```
+
+## License
+
+MIT (see `LICENSE`), except `scriptexec/` (CC0-1.0) and `simulator/` (MIT),
+which keep their upstream licenses.

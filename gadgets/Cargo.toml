@@ -2,6 +2,7 @@
 name = "gsr-gadgets"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Bitcoin Script gadgets for covenants in tapscript leaf version 0xc2 (BIP 440/441)"
 
 [dependencies]
