@@ -74,6 +74,10 @@ impl Stack {
             .push(StackEntry::StrRef(Rc::new(RefCell::new(v.to_vec()))));
     }
 
+    pub(crate) fn pushvec(&mut self, v: Vec<u8>) {
+        self.0.push(StackEntry::StrRef(Rc::new(RefCell::new(v))));
+    }
+
     pub fn push(&mut self, v: StackEntry) {
         self.0.push(v);
     }

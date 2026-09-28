@@ -40,6 +40,10 @@ impl ConditionStack {
         Self::default()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
     pub fn all_true(&self) -> bool {
         self.first_false_pos == Self::NO_FALSE
     }

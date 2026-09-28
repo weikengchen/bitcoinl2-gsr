@@ -20,10 +20,14 @@ use utils::ConditionStack;
 
 mod signatures;
 
+mod exec_v2;
+pub use exec_v2::{eval_tapscript_v2, execute_tapscript_v2, V2Eval};
+
 mod error;
 pub use error::{Error, ExecError};
 
 mod data_structures;
+pub mod v2;
 use crate::data_structures::{ScriptIntError, StackEntry};
 use crate::utils::{read_scriptint_size, scriptint_vec};
 pub use data_structures::Stack;
@@ -96,6 +100,10 @@ pub struct Options {
     pub enforce_stack_limit: bool,
 
     pub experimental: Experimental,
+
+    /// Remaining transaction-wide varops budget for tapscript v2 (BIP 440).
+    /// `None` means unmetered: costs are still counted in [ExecStats].
+    pub varops_budget: Option<u64>,
 }
 
 impl Default for Options {
@@ -110,6 +118,7 @@ impl Default for Options {
                 op_cat: true,
                 op_mul: false,
             },
+            varops_budget: None,
         }
     }
 }
@@ -126,6 +135,7 @@ impl Options {
                 op_cat: true,
                 op_mul: true,
             },
+            varops_budget: None,
         }
     }
 }
@@ -135,6 +145,8 @@ pub enum ExecCtx {
     Legacy,
     SegwitV0,
     Tapscript,
+    /// Tapscript leaf version 0xc2 (BIP 441).
+    TapscriptV2,
 }
 
 pub struct TxTemplate {
@@ -172,6 +184,9 @@ impl ExecutionResult {
                     } else {
                         script::read_scriptbool(&final_stack.last().unwrap())
                     }
+                }
+                ExecCtx::TapscriptV2 => {
+                    final_stack.len() == 1 && !v2::is_zero(&final_stack.last().unwrap())
                 }
             },
             final_stack,
@@ -216,6 +231,9 @@ impl ExecutionResult {
                         script::read_scriptbool(&final_stack.last().unwrap())
                     }
                 }
+                ExecCtx::TapscriptV2 => {
+                    final_stack.len() == 1 && !v2::is_zero(&final_stack.last().unwrap())
+                }
             },
             final_stack,
             error: None,
@@ -239,6 +257,11 @@ pub struct ExecStats {
     pub start_validation_weight: i64,
     /// The current remaining validation weight.
     pub validation_weight: i64,
+
+    /// Varops consumed by opcode execution (tapscript v2).
+    pub varops_used: u64,
+    /// Varops consumed by the final stack check (tapscript v2).
+    pub varops_final_check: u64,
 }
 
 /// Partial execution of a script.
@@ -262,6 +285,12 @@ pub struct Exec {
 
     opcode_count: usize,
     validation_weight: i64,
+
+    // tapscript v2 state
+    v2_opcode_pos: u32,
+    varops_used: u64,
+    varops_final_check: u64,
+    v2_skip_final_check: bool,
 
     // runtime statistics
     stats: ExecStats,
@@ -288,7 +317,7 @@ impl Exec {
         script: ScriptBuf,
         script_witness: Vec<Vec<u8>>,
     ) -> Result<Exec, Error> {
-        if ctx == ExecCtx::Tapscript {
+        if ctx == ExecCtx::Tapscript || ctx == ExecCtx::TapscriptV2 {
             if tx.taproot_annex_scriptleaf.is_none() {
                 return Err(Error::Other("missing taproot tx info in tapscript context"));
             }
@@ -300,6 +329,34 @@ impl Exec {
             }
         }
 
+        // Tapscript v2: OP_SUCCESSx overrides everything, including stack limits,
+        // but a parse error before it fails the script.
+        let mut op_success = false;
+        if ctx == ExecCtx::TapscriptV2 {
+            for res in script.instructions() {
+                match res {
+                    Err(err) => return Err(Error::InvalidScript(err)),
+                    Ok(Instruction::Op(op)) if v2::is_op_success(op.to_u8()) => {
+                        op_success = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                }
+            }
+            if !op_success {
+                if script_witness.len() > v2::MAX_STACK_SIZE {
+                    return Err(Error::Exec(ExecError::StackSize));
+                }
+                let total: usize = script_witness.iter().map(|e| e.len()).sum();
+                if total > v2::MAX_TOTAL_STACK_SIZE {
+                    return Err(Error::Exec(ExecError::TotalStackSize));
+                }
+                if script_witness.iter().any(|e| e.len() > v2::MAX_STACK_ELEMENT_SIZE) {
+                    return Err(Error::Exec(ExecError::StackElementSize));
+                }
+            }
+        }
+
         // We want to make sure the script is valid so we don't have to throw parsing errors
         // while executing.
         let instructions = if opt.require_minimal {
@@ -307,8 +364,10 @@ impl Exec {
         } else {
             script.instructions()
         };
-        if let Some(err) = instructions.clone().find_map(|res| res.err()) {
-            return Err(Error::InvalidScript(err));
+        if !op_success {
+            if let Some(err) = instructions.clone().find_map(|res| res.err()) {
+                return Err(Error::InvalidScript(err));
+            }
         }
 
         // *****
@@ -344,6 +403,10 @@ impl Exec {
             altstack: Stack::new(),
             opcode_count: 0,
             validation_weight: start_validation_weight,
+            v2_opcode_pos: 0,
+            varops_used: 0,
+            varops_final_check: 0,
+            v2_skip_final_check: false,
             last_codeseparator_pos: None,
             script_code: script,
 
@@ -360,6 +423,17 @@ impl Exec {
             profiler: Profiler::new(),
         };
         ret.update_stats();
+        if op_success {
+            let final_stack = ret.stack.clone();
+            ret.result = Some(ExecutionResult {
+                success: true,
+                error: None,
+                opcode: None,
+                final_stack,
+                #[cfg(feature = "profiler")]
+                profiler: None,
+            });
+        }
         Ok(ret)
     }
 
@@ -527,6 +601,7 @@ impl Exec {
         match self.ctx {
             ExecCtx::Legacy | ExecCtx::SegwitV0 => self.check_sig_pre_tap(sig, pk),
             ExecCtx::Tapscript => self.check_sig_tap(sig, pk),
+            ExecCtx::TapscriptV2 => self.check_sig_tap_v2(sig, pk),
         }
     }
 
@@ -536,6 +611,9 @@ impl Exec {
 
     /// Returns true when execution is done.
     pub fn exec_next(&mut self) -> Result<(), &ExecutionResult> {
+        if self.ctx == ExecCtx::TapscriptV2 {
+            return self.exec_next_v2();
+        }
         if let Some(ref res) = self.result {
             return Err(res);
         }
@@ -1130,6 +1208,8 @@ impl Exec {
 
         self.stats.opcode_count = self.opcode_count;
         self.stats.validation_weight = self.validation_weight;
+        self.stats.varops_used = self.varops_used;
+        self.stats.varops_final_check = self.varops_final_check;
     }
 }
 

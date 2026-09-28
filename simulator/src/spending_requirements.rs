@@ -9,8 +9,10 @@ use bitcoin::{
     secp256k1, CompressedPublicKey, Script, ScriptBuf, TapLeafHash, Transaction, TxOut,
     WitnessProgram, XOnlyPublicKey,
 };
+use bitcoin_scriptexec::v2::{varops, TAPROOT_LEAF_TAPSCRIPT_V2};
 use bitcoin_scriptexec::{
-    execute_script_with_witness_and_tx_template, Exec, ExecCtx, Options, TxTemplate,
+    execute_script_with_witness_and_tx_template, execute_tapscript_v2, Exec, ExecCtx, Options,
+    TxTemplate,
 };
 
 pub struct P2WPKHChecker;
@@ -128,6 +130,18 @@ pub struct P2TRChecker;
 
 impl P2TRChecker {
     pub fn check(tx: &Transaction, prevouts: &[TxOut], input_idx: usize) -> Result<()> {
+        let mut varops_budget = varops::tx_budget(tx.weight().to_wu());
+        Self::check_with_varops(tx, prevouts, input_idx, &mut varops_budget)
+    }
+
+    /// Like [P2TRChecker::check], charging tapscript v2 (leaf version 0xc2) execution
+    /// against a varops budget shared by all inputs of the transaction (BIP 440).
+    pub fn check_with_varops(
+        tx: &Transaction,
+        prevouts: &[TxOut],
+        input_idx: usize,
+        varops_budget: &mut u64,
+    ) -> Result<()> {
         let sig_pub_key_bytes = prevouts[input_idx].script_pubkey.as_bytes();
 
         let witness_version = sig_pub_key_bytes[0];
@@ -174,15 +188,37 @@ impl P2TRChecker {
             ));
         }
 
+        let leaf_version = control_block.leaf_version;
         let tx_template = TxTemplate {
             tx: tx.clone(),
             prevouts: prevouts.to_vec(),
             input_idx,
-            taproot_annex_scriptleaf: Some((
-                TapLeafHash::from_script(script, LeafVersion::TapScript),
-                annex,
-            )),
+            taproot_annex_scriptleaf: Some((TapLeafHash::from_script(script, leaf_version), annex)),
         };
+
+        if leaf_version.to_consensus() == TAPROOT_LEAF_TAPSCRIPT_V2 {
+            let info = execute_tapscript_v2(
+                ScriptBuf::from_bytes(script_buf),
+                tx_template,
+                witness,
+                Some(*varops_budget),
+            )
+            .map_err(|e| Error::msg(format!("The script cannot be executed: {:?}", e)))?;
+            if !info.success {
+                return Err(Error::msg(format!(
+                    "The tapscript v2 execution is not successful: {:?} at {:?} ({:?})",
+                    info.error, info.last_opcode, info.stats
+                )));
+            }
+            *varops_budget -= info.stats.varops_used + info.stats.varops_final_check;
+            return Ok(());
+        }
+        if leaf_version != LeafVersion::TapScript {
+            return Err(Error::msg(format!(
+                "Unsupported tapleaf version {:#x}.",
+                leaf_version.to_consensus()
+            )));
+        }
 
         let exec_result = execute_script_with_witness_and_tx_template(
             ScriptBuf::from_bytes(script_buf),

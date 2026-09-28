@@ -1,6 +1,7 @@
 use crate::policy::Policy;
 use crate::spending_requirements::{P2TRChecker, P2WPKHChecker, P2WSHChecker};
 use anyhow::{Error, Result};
+use bitcoin_scriptexec::v2::varops;
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
 use rusqlite::{params, Connection};
@@ -228,20 +229,26 @@ impl Database {
                 "Bitcoin simulator only verifies inputs that support segregated witness."
             );
 
-            let prev_out = self.get_prev_output(
-                &input.previous_output.txid.to_string(),
-                input.previous_output.vout,
-            )?;
+            let prev_txid = input.previous_output.txid.to_string();
+            let prev_out = self.get_prev_output(&prev_txid, input.previous_output.vout)?;
+            if self.check_if_output_is_spent(&prev_txid, input.previous_output.vout)? {
+                return Err(Error::msg(format!(
+                    "The output {}:{} has already been spent.",
+                    prev_txid, input.previous_output.vout
+                )));
+            }
             prev_outs.push(prev_out);
         }
 
+        // BIP 440: the varops budget is shared by all inputs of the transaction.
+        let mut varops_budget = varops::tx_budget(tx.weight().to_wu());
         for input_idx in 0..tx.input.len() {
             if prev_outs[input_idx].script_pubkey.is_p2wpkh() {
                 P2WPKHChecker::check(&tx, &prev_outs, input_idx)?;
             } else if prev_outs[input_idx].script_pubkey.is_p2wsh() {
                 P2WSHChecker::check(&tx, &prev_outs, input_idx)?;
             } else if prev_outs[input_idx].script_pubkey.is_p2tr() {
-                P2TRChecker::check(&tx, &prev_outs, input_idx)?;
+                P2TRChecker::check_with_varops(&tx, &prev_outs, input_idx, &mut varops_budget)?;
             }
         }
 

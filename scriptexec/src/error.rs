@@ -36,6 +36,15 @@ pub enum ExecError {
     Debug,
 
     DivByZero,
+
+    // tapscript v2 (BIP 440/441)
+    VaropCount,
+    SubUnderflow,
+    StackElementSize,
+    TotalStackSize,
+    HashOperandSize,
+    CleanStack,
+    EvalFalse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

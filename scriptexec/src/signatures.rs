@@ -59,7 +59,7 @@ impl Exec {
             return Err(ExecError::SchnorrSigSize);
         }
 
-        let pk = XOnlyPublicKey::from_slice(pk).expect("TODO(stevenroose) what to do here?");
+        let pk = XOnlyPublicKey::from_slice(pk).map_err(|_| ExecError::SchnorrSig)?;
         let (sig, hashtype) = if sig.len() == 65 {
             let b = *sig.last().unwrap();
             let sig = secp256k1::schnorr::Signature::from_slice(&sig[0..sig.len() - 1])
