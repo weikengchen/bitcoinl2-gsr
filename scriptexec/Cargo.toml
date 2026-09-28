@@ -1,0 +1,23 @@
+[package]
+name = "bitcoin-scriptexec"
+version = "0.0.0"
+edition = "2021"
+description = "Bitcoin Script interpreter/executor"
+authors = ["Steven Roose <steven@roose.io>"]
+license = "CC0-1.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bitcoin = "0.32.0"
+lazy_static = "1.4.0"
+anyhow = "1.0.86"
+indexmap = { version = "2.7.0", optional = true }
+
+# I think we need to mention this for secp256k1-sys to work
+getrandom = { version = "0.2", optional = true }
+
+[features]
+debug = []
+profiler = ["indexmap"]
