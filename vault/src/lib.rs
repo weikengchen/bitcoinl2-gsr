@@ -4,5 +4,6 @@
 //! and `app_root = SHA256(acc || mode)` with `acc' = SHA256(acc || txid(parent))`.
 
 pub mod leaf;
+pub mod program_a;
 pub mod state;
 pub mod tx;

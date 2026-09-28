@@ -75,6 +75,12 @@ impl SighashAllData {
 
     /// Hints for [SighashAllGadget::build], in consumption order.
     pub fn hints(&self) -> Vec<Vec<u8>> {
+        self.hints_ext(false)
+    }
+
+    /// Hints for [SighashAllGadget::build_ext]; with `index_hint`, the input
+    /// index is provided as a hint instead of being a script constant.
+    pub fn hints_ext(&self, index_hint: bool) -> Vec<Vec<u8>> {
         let mut h = vec![];
         h.extend(self.outpoints.iter().cloned());
         h.extend(self.amounts.iter().cloned());
@@ -82,6 +88,9 @@ impl SighashAllData {
         h.extend(self.sequences.iter().cloned());
         h.extend(self.outputs.iter().cloned());
         h.push(self.lock_time.to_le_bytes().to_vec());
+        if index_hint {
+            h.push(self.input_index.to_le_bytes().to_vec());
+        }
         h.push(self.tapleaf_hash.to_vec());
         h
     }
@@ -96,6 +105,8 @@ pub enum Field {
     Sequence(usize),
     Output(usize),
     LockTime,
+    /// Only with [SighashAllGadget::build_ext] and a runtime index.
+    InputIndex,
 }
 
 /// `( item -- item )` for `compact_size(len) || data` with a one-byte length.
@@ -124,8 +135,16 @@ impl SighashAllGadget {
     ///
     /// Every item is size-checked so the hints partition the committed vectors uniquely.
     pub fn build(n_inputs: usize, n_outputs: usize, input_index: u32, version: u32) -> Script {
+        Self::build_ext(n_inputs, n_outputs, Some(input_index), version)
+    }
+
+    /// Like [SighashAllGadget::build]; with `input_index = None` the index is a
+    /// 4-byte hint, authenticated by the signature check and left on the stack:
+    /// `( -- outpoints[n] amounts[n] script_pubkeys[n] sequences[n] outputs[m] lock_time input_index preimage )`.
+    pub fn build_ext(n_inputs: usize, n_outputs: usize, input_index: Option<u32>, version: u32) -> Script {
         let (n, m) = (n_inputs, n_outputs);
-        let items = 4 * n + m + 1;
+        let runtime_index = input_index.is_none();
+        let items = 4 * n + m + 1 + runtime_index as usize;
         let mut parts = vec![];
         for _ in 0..n {
             parts.push(cat(&[OP_HINT(), script! { OP_SIZE 36 OP_EQUALVERIFY }]));
@@ -143,11 +162,15 @@ impl SighashAllGadget {
             parts.push(cat(&[OP_HINT(), check_txout()]));
         }
         parts.push(cat(&[OP_HINT(), script! { OP_SIZE 4 OP_EQUALVERIFY }]));
+        if runtime_index {
+            parts.push(cat(&[OP_HINT(), script! { OP_SIZE 4 OP_EQUALVERIFY }]));
+        }
 
         // epoch || hash_type || nVersion || nLockTime
         let mut prefix = vec![0x00, SIGHASH_ALL];
         prefix.extend(version.to_le_bytes());
-        parts.push(cat(&[push_data(&prefix), script! { OP_OVER OP_CAT }]));
+        let lock_time_depth = runtime_index as usize + 1;
+        parts.push(cat(&[push_data(&prefix), pick(lock_time_depth), script! { OP_CAT }]));
 
         // sha_prevouts, sha_amounts, sha_scriptpubkeys, sha_sequences, sha_outputs
         for (start, count) in [(0, n), (n, n), (2 * n, n), (3 * n, n), (4 * n, m)] {
@@ -160,20 +183,29 @@ impl SighashAllGadget {
             parts.push(script! { OP_SHA256 OP_CAT });
         }
 
-        let mut spend = vec![0x02];
-        spend.extend(input_index.to_le_bytes());
-        parts.push(cat(&[push_data(&spend), script! { OP_CAT }]));
+        match input_index {
+            Some(i) => {
+                let mut spend = vec![0x02];
+                spend.extend(i.to_le_bytes());
+                parts.push(cat(&[push_data(&spend), script! { OP_CAT }]));
+            }
+            None => {
+                // stack: items.. input_index preimage
+                parts.push(cat(&[push_data(&[0x02]), script! { OP_CAT OP_OVER OP_CAT }]));
+            }
+        }
         parts.push(cat(&[OP_HINT(), script! { OP_SIZE 32 OP_EQUALVERIFY OP_CAT }]));
         parts.push(cat(&[push_data(&[0x00, 0xff, 0xff, 0xff, 0xff]), script! { OP_CAT }]));
         cat(&parts)
     }
 
-    /// Number of items left below the preimage.
+    /// Number of items left below the preimage by [SighashAllGadget::build].
     pub fn items(n_inputs: usize, n_outputs: usize) -> usize {
         4 * n_inputs + n_outputs + 1
     }
 
-    /// Depth of `field` once the preimage has been consumed and nothing else was pushed.
+    /// Depth of `field` once the preimage of [SighashAllGadget::build] has been
+    /// consumed and nothing else was pushed.
     pub fn depth(n_inputs: usize, n_outputs: usize, field: Field) -> usize {
         let n = n_inputs;
         let pos = match field {
@@ -183,7 +215,30 @@ impl SighashAllGadget {
             Field::Sequence(i) => 3 * n + i,
             Field::Output(j) => 4 * n + j,
             Field::LockTime => 4 * n + n_outputs,
+            Field::InputIndex => panic!("the input index is a constant in `build`"),
         };
         Self::items(n_inputs, n_outputs) - 1 - pos
+    }
+
+    /// Stack names for [crate::stack::Stk] after [SighashAllGadget::build_ext],
+    /// bottom to top, ending with `{p}.preimage`: `{p}.op{i}`, `{p}.am{i}`,
+    /// `{p}.spk{i}`, `{p}.seq{i}`, `{p}.out{j}`, `{p}.lt` and, with a runtime
+    /// index, `{p}.index`.
+    pub fn names(p: &str, n_inputs: usize, n_outputs: usize, runtime_index: bool) -> Vec<String> {
+        let mut v = vec![];
+        for f in ["op", "am", "spk", "seq"] {
+            for i in 0..n_inputs {
+                v.push(format!("{p}.{f}{i}"));
+            }
+        }
+        for j in 0..n_outputs {
+            v.push(format!("{p}.out{j}"));
+        }
+        v.push(format!("{p}.lt"));
+        if runtime_index {
+            v.push(format!("{p}.index"));
+        }
+        v.push(format!("{p}.preimage"));
+        v
     }
 }

@@ -96,20 +96,45 @@
 - **暴露出的约束**（相当于 spec RES-2 在 GSR 下的版本）：被反射的 T 和 Q 最多 8 个输入、8 个输出，scriptSig 为空，输出脚本短于 253 字节。这也包括创世的出资交易，也就是创世分支里的 Q。
 - **P4a 的简化，留给 P4b**：只有一种交易模板（in `[vault, fee]`、out `[vault, change, caboose]`）；金额不变；Init、First 和出资来源谓词都接受任意值。
 
-### P4b vault 应用迁移（下一步）
+### P4b/P5a 存款线（vault 并入 + program a）—— 完成（2026-09-28）
+
+- **gadgets**：`SighashAllGadget::build_ext` 可以把输入下标作为 hint 传入，由签名检查认证，并留在栈上。用于需要在任意输入位置执行的 leaf。
+- **vault**：`vault_leaf(Template)` 按模板生成 leaf。
+  - 模板：输入 `[vault, 存款×j, fee]`，输出 `[vault, change, (聚合者 OP_RETURN), caboose]`；vault 金额恰好增加这些存款之和。
+  - vault 的树有 5 个 leaf：原来的迁移，加上并入 j = 1～4。
+  - `Vault::with_deposits`、`build_with` 负责构造并入交易。
+- **program a**（`vault/src/program_a.rs`）：
+  - 规则见 design §6"实现"。7 个 leaf：合并 j = 2～4，并入 j = 1～4。
+  - 构造器：`deposit_outputs`；`merge_tx`，靠 OP_RETURN 的 nonce 做调整；`fold_tx`，经 `Vault::build_with` 调整 caboose 的 r。
+- **测试 `vault/tests/deposit.rs`**：7 项全部通过。
+  - 正例：
+    - 存款 → 两层合并 → 并入：vault 余额和 acc 都正确；之后的迁移能把并入交易当作父交易反射。
+    - 7 种形状各走一遍。
+  - 反例：只单独执行那个 a 输入，断言具体失败的 opcode，因此不会因为签名错误而"碰巧"失败；每个反例都有诚实对照。
+    - 合并：out0 少 1 或多 1；out0 不是 a_L；change 是 a_L；fee 输入是 a_L；两个 L2 的 a 混在一起。
+    - 并入：
+      - 并进克隆 vault（克隆 vault 自己的 leaf 能通过，a 拒绝）；
+      - 别的 L2 的 a 并进本 vault；
+      - change 是 a_L（vault 的 leaf 允许，a 拒绝）；
+      - vault 少增加 1；
+      - S′ 与 caboose 不一致；
+      - in0 不是 P，而是普通输出，caboose 伪称 id 为 L。
+  - identity 和 deposit 两组测试共用 `tests/common/` 里的钱包和模拟器环境。
+- **大小**：见 design §6。并入 j = 1 时整笔交易 1,588 vB，j = 4 时 3,404 vB；合并 j = 2 时 834 vB。
+
+### P4b 剩余：锁定、验证、提款、超时（下一步）
 
 - 按 spec v0.1.0 加上已定的偏离：
   - envelope 格式不变；`app_root = H(acc ‖ mode ‖ 模式相关数据)`。
   - caboose 用裸 OP_RETURN。
   - 两代回溯，分创世和延续两个分支。
   - 每次迁移 `acc' = H(acc ‖ txid(父交易))`。
-- 迁移类型：并入；锁定（VERIFYING，保证金，nLockTime = h）；验证步骤；完成提款（退还保证金，提款用 operator CHECKSIG 占位）；超时（单独的 leaf，CLTV ≥ h + N）。
+- 迁移类型：锁定（VERIFYING，保证金，nLockTime = h）；验证步骤；完成提款（退还保证金，提款用 operator CHECKSIG 占位）；超时（单独的 leaf，CLTV ≥ h + N）。
 - 测试：覆盖 `verification-cases.md` 中的 G/L/A/E/V 各组用例。
 
-### P5 program a / program b
+### P5b program b
 
-- program a：地址 a_L 里写死 L 和 P；合并规则；并入规则。
-- program b：Merkle-sum 拆分树。
+- Merkle-sum 拆分树。
 
 ### P6 在真实实现上对照验证（已取消，2026-09-28）
 

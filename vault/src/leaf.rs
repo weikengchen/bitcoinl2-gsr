@@ -20,67 +20,67 @@ pub const SEQUENCE: u32 = 0xfffffffd;
 /// nVersion of every protocol transaction (spec §8.1).
 pub const TX_VERSION: u32 = 2;
 
-fn op(o: Opcode) -> Script {
+pub(crate) fn op(o: Opcode) -> Script {
     Builder::new().push_opcode(o).into_script()
 }
 
-fn ops(o: &[Opcode]) -> Script {
+pub(crate) fn ops(o: &[Opcode]) -> Script {
     cat(&o.iter().map(|x| op(*x)).collect::<Vec<_>>())
 }
 
 /// `name == bytes`
-fn eq_const(s: &mut Stk, name: &str, bytes: &[u8]) {
+pub(crate) fn eq_const(s: &mut Stk, name: &str, bytes: &[u8]) {
     s.pick(name, "_x");
     s.push_data(bytes, "_c");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
 }
 
 /// `a == b`
-fn eq(s: &mut Stk, a: &str, b: &str) {
+pub(crate) fn eq(s: &mut Stk, a: &str, b: &str) {
     s.pick(a, "_x");
     s.pick(b, "_y");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
 }
 
 /// `a != b`
-fn neq(s: &mut Stk, a: &str, b: &str) {
+pub(crate) fn neq(s: &mut Stk, a: &str, b: &str) {
     s.pick(a, "_x");
     s.pick(b, "_y");
     s.apply(ops(&[OP_EQUAL, OP_NOT, OP_VERIFY]), 2, &[]);
 }
 
 /// Numeric `name == n`.
-fn num_eq(s: &mut Stk, name: &str, n: u64) {
+pub(crate) fn num_eq(s: &mut Stk, name: &str, n: u64) {
     s.pick(name, "_x");
     s.push_u64(n, "_c");
     s.apply(op(OP_NUMEQUALVERIFY), 2, &[]);
 }
 
-fn left(s: &mut Stk, src: &str, n: usize, as_: &str) {
+pub(crate) fn left(s: &mut Stk, src: &str, n: usize, as_: &str) {
     s.pick(src, "_x");
     s.push_u64(n as u64, "_n");
     s.apply(op(OP_LEFT), 2, &[as_]);
 }
 
-fn right(s: &mut Stk, src: &str, n: usize, as_: &str) {
+pub(crate) fn right(s: &mut Stk, src: &str, n: usize, as_: &str) {
     s.pick(src, "_x");
     s.push_u64(n as u64, "_n");
     s.apply(op(OP_RIGHT), 2, &[as_]);
 }
 
-fn substr(s: &mut Stk, src: &str, off: usize, len: usize, as_: &str) {
+pub(crate) fn substr(s: &mut Stk, src: &str, off: usize, len: usize, as_: &str) {
     s.pick(src, "_x");
     s.push_u64(off as u64, "_o");
     s.push_u64(len as u64, "_n");
     s.apply(op(OP_SUBSTR), 3, &[as_]);
 }
 
-fn sha256(s: &mut Stk, src: &str, as_: &str) {
+pub(crate) fn sha256(s: &mut Stk, src: &str, as_: &str) {
     s.pick(src, "_x");
     s.apply(op(OP_SHA256), 1, &[as_]);
 }
 
-fn size_eq(s: &mut Stk, name: &str, n: u64) {
+pub(crate) fn size_eq(s: &mut Stk, name: &str, n: u64) {
     s.pick(name, "_x");
     s.apply(ops(&[OP_SIZE, OP_NIP]), 1, &["_sz"]);
     s.push_u64(n, "_c");
@@ -88,7 +88,7 @@ fn size_eq(s: &mut Stk, name: &str, n: u64) {
 }
 
 /// The compact-size-prefixed scriptPubKey of a serialized output.
-fn spk_of_output(s: &mut Stk, out: &str, as_: &str) {
+pub(crate) fn spk_of_output(s: &mut Stk, out: &str, as_: &str) {
     s.pick(out, "_x");
     s.pick(out, "_y");
     s.apply(ops(&[OP_SIZE, OP_NIP]), 1, &["_sz"]);
@@ -98,7 +98,7 @@ fn spk_of_output(s: &mut Stk, out: &str, as_: &str) {
 }
 
 /// A compact-size-prefixed P2WPKH, P2WSH or P2TR scriptPubKey (spec §8.1).
-fn native_segwit(s: &mut Stk, spk: &str) {
+pub(crate) fn native_segwit(s: &mut Stk, spk: &str) {
     left(s, spk, 3, "_pfx");
     let mut first = true;
     for pfx in [[0x16, 0x00, 0x14], [0x22, 0x00, 0x20], [0x22, 0x51, 0x20]] {
@@ -115,7 +115,7 @@ fn native_segwit(s: &mut Stk, spk: &str) {
 }
 
 /// A caboose output `0 || 0x26 || OP_RETURN PUSHBYTES_36 <h || r>`: returns `h`.
-fn caboose_hash(s: &mut Stk, out: &str, as_: &str) {
+pub(crate) fn caboose_hash(s: &mut Stk, out: &str, as_: &str) {
     size_eq(s, out, 8 + 1 + 38);
     let mut prefix = vec![0u8; 8];
     prefix.extend([0x26, 0x6a, 0x24]);
@@ -125,46 +125,95 @@ fn caboose_hash(s: &mut Stk, out: &str, as_: &str) {
     substr(s, out, 11, 32, as_);
 }
 
-/// The minimal transition: inputs `[vault, fee]`, outputs `[vault, change, caboose]`,
-/// vault amount unchanged.
+/// Shape of a vault transaction:
+/// inputs `[vault, deposit x deposits, fee]`,
+/// outputs `[vault, change, (aggregator OP_RETURN), caboose]`.
+/// The vault amount grows by exactly the deposit inputs' amounts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Template {
+    pub deposits: usize,
+    pub aggregator_output: bool,
+}
+
+impl Template {
+    /// Inputs `[vault, fee]`, outputs `[vault, change, caboose]`.
+    pub const TRANSITION: Template = Template { deposits: 0, aggregator_output: false };
+
+    /// Fold `j` deposit inputs: outputs `[vault, change, aggregator OP_RETURN, caboose]`.
+    pub fn fold(j: usize) -> Template {
+        Template { deposits: j, aggregator_output: true }
+    }
+
+    pub fn n_inputs(&self) -> usize {
+        2 + self.deposits
+    }
+
+    pub fn n_outputs(&self) -> usize {
+        3 + self.aggregator_output as usize
+    }
+}
+
+/// The minimal transition leaf.
+pub fn transition_leaf() -> Script {
+    vault_leaf(Template::TRANSITION)
+}
+
+/// A vault leaf for one transaction template.
 ///
 /// Hints, in order: SIGHASH_ALL data of the transaction, the two Schnorr-trick
 /// hints, the parent T, the old state S, the old application state A, the new
 /// state S', the new application state A', and the grandparent Q.
-pub fn transition_leaf() -> Script {
-    let (n, m) = (2, 3);
+pub fn vault_leaf(t: Template) -> Script {
+    let (n, m) = (t.n_inputs(), t.n_outputs());
+    let fee = n - 1;
+    let caboose = m - 1;
     let mut s = Stk::new(&[]);
 
     // AUTH-1: authenticate the whole transaction (SIGHASH_ALL, input index 0, version 2).
-    s.gadget(
-        SighashAllGadget::build(n, m, 0, TX_VERSION),
-        0,
-        &[
-            "x.op0", "x.op1", "x.am0", "x.am1", "x.spk0", "x.spk1", "x.seq0", "x.seq1", "x.out0",
-            "x.out1", "x.out2", "x.lt", "x.pre",
-        ],
-    );
+    let names = SighashAllGadget::names("x", n, m, false);
+    let names: Vec<&str> = names.iter().map(|x| x.as_str()).collect();
+    s.gadget(SighashAllGadget::build(n, m, 0, TX_VERSION), 0, &names);
     s.gadget(SchnorrTrickGadget::verify(), 1, &[]);
 
     // Protocol format (§8.1) and roles (LIN, ROLE, CAB).
     eq_const(&mut s, "x.lt", &[0; 4]);
-    eq_const(&mut s, "x.seq0", &SEQUENCE.to_le_bytes());
-    eq_const(&mut s, "x.seq1", &SEQUENCE.to_le_bytes());
+    for i in 0..n {
+        eq_const(&mut s, &format!("x.seq{i}"), &SEQUENCE.to_le_bytes());
+    }
     right(&mut s, "x.op0", 4, "_vout"); // LIN-2: spends output 0
     s.push_data(&[0; 4], "_c");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
-    native_segwit(&mut s, "x.spk1"); // fee input
-    neq(&mut s, "x.spk1", "x.spk0"); // LIN-1: no second main-program input
-    // successor: same scriptPubKey P, same amount (VALUE: no vault costs in this template)
-    s.pick("x.am0", "_a");
+    for i in 1..n {
+        // deposits and the fee input: native segwit, not a second main program (LIN-1)
+        let spk = format!("x.spk{i}");
+        native_segwit(&mut s, &spk);
+        neq(&mut s, &spk, "x.spk0");
+    }
+    // successor: scriptPubKey P, amount = old amount + deposits (VALUE-1/2)
+    left(&mut s, "x.out0", 8, "_new_amount");
+    s.pick("x.am0", "_sum");
+    for i in 1..=t.deposits {
+        s.pick(&format!("x.am{i}"), "_d");
+        s.apply(op(OP_ADD), 2, &["_sum"]);
+    }
+    s.apply(op(OP_NUMEQUALVERIFY), 2, &[]);
+    spk_of_output(&mut s, "x.out0", "_succ_spk");
     s.pick("x.spk0", "_p");
-    s.apply(op(OP_CAT), 2, &["_succ"]);
-    s.pick("x.out0", "_o");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
     spk_of_output(&mut s, "x.out1", "x.out1.spk"); // change
     native_segwit(&mut s, "x.out1.spk");
-    neq(&mut s, "x.out1.spk", "x.spk0"); // LIN-1: no second main-program output
-    caboose_hash(&mut s, "x.out2", "h_new"); // CAB-1: the last output is the caboose
+    neq(&mut s, "x.out1.spk", "x.spk0");
+    caboose_hash(&mut s, &format!("x.out{caboose}"), "h_new"); // CAB-1
+    if t.aggregator_output {
+        // an OP_RETURN that is not the caboose's script (CAB-4)
+        spk_of_output(&mut s, "x.out2", "x.out2.spk");
+        substr(&mut s, "x.out2.spk", 1, 1, "_op");
+        s.push_data(&[0x6a], "_c");
+        s.apply(op(OP_EQUALVERIFY), 2, &[]);
+        spk_of_output(&mut s, &format!("x.out{caboose}"), "_cab_spk");
+        neq(&mut s, "x.out2.spk", "_cab_spk");
+    }
+    let _ = fee;
 
     // AUTH-2: the parent T.
     s.gadget(OP_HINT(), 0, &["T"]);

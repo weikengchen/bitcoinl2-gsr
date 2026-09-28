@@ -83,9 +83,9 @@ spec 副本在 `docs/spec/utxo-linearization-v0.1.0-en/`，来源见 §9。
 
 **存款数据怎么进入 acc**：数据不会被复制进 out0，out0 只是金额变多；数据是通过 txid 链接进 acc 的，并且比并入交易晚一步。
 
-1. 存款交易 D：输出 program a（金额 v），再加一个 OP_RETURN（L2 id、L2 收款地址、金额）。
+1. 存款交易 D：输出 a_L（金额 v），紧跟一个 OP_RETURN，只放 L2 收款地址（§6）。
 2. 合并交易 M（可选，可递归）：花掉 a1、a2，产生新的 a，金额 v1+v2。M 的 txid 本身就承诺了它花掉的两个 outpoint。
-3. 并入交易 Xn：in0 是 vault，in1 是 a；out0 是新 vault，余额 +v；最后一个输出是 caboose。这一步 a 只出现在 Xn 的输入 outpoint 里。vault 脚本只检查两件事：in1 的地址确实是 program a；out0 的金额等于旧余额 + v，减去允许的手续费。
+3. 并入交易 Xn：in0 是 vault，in1.. 是 a；out0 是新 vault，余额恰好增加这些 a 的金额之和；最后一个输出是 caboose。这一步 a 只出现在 Xn 的输入 outpoint 里。vault 脚本不认 a 的地址，只检查金额；vault 的 id 由 a 自己的脚本检查（§6）。
 4. 下一次迁移 Xn+1：`acc = H(acc ‖ txid(Xn))`，到这时 a 才进入 acc。
 
 SNARK 的追溯路径：acc → Xn → Xn.in1 的 outpoint → M → M 的各个输入 outpoint → 各笔 D 的 OP_RETURN。用到的全部是链上的非见证数据。
@@ -125,13 +125,31 @@ caboose = OP_RETURN PUSHBYTES_36 <H(state) ‖ LE32(r)>
   1. 只有 out0 的地址等于自己的地址（self spk），也就是只产生一个新的 a_L。
   2. out0 的金额等于所有 a_L 输入金额之和。手续费由额外的付费输入承担，由谁付见 §8。
   3. 不需要给 a 用的 OP_RETURN，SNARK 沿 outpoint 追溯整棵树。可以带一个写聚合者 L2 地址的 OP_RETURN，a 不检查它。
-  4. a_L 输入的个数有上限（固定为 2 或某个 K）。
+  4. a_L 输入的个数有上限（实现取 2～4）。
   5. in0 不是 vault（P）。如果 in0 是 vault，这笔交易就是并入，按下面并入的规则检查。
 - **并入交易 X**：in0 是 vault。每个 a_L 输入都只看当前交易，检查以下条件。
   1. in0 花费的地址等于 P（从 `sha_scriptpubkeys` 读）。
   2. 见证提供 X 的新状态 S′。H(S′) 必须与 X 的最后一个输出（caboose）一致，且 S′.id == L。
-  3. out0 − in0 ≥ 本交易中所有 a_L 输入的金额之和。
+  3. out0 − in0 == 本交易中所有 a_L 输入的金额之和。最初写的是 ≥，实现时改成相等：模板里 a 的位置上只能是 a_L，vault 自己的 leaf 也要求恰好相等。
   - 为什么这些就够了：X 要有效，in0 上 vault 自己的脚本必须通过，而它已经保证 S′ 是真 vault 的合法后继。伪造的 P 输出花不出去，克隆出来的 vault id 又不同。
+- **实现（2026-09-28，`vault/src/program_a.rs`）**：每个 leaf 对应一种固定的交易模板。输入下标作为 hint 传入，由签名检查认证，所以同一个 leaf 可以在任意输入位置执行。
+  - 合并，j = 2～4：输入 `[a×j, fee]`，输出 `[a(Σ), change, 聚合者输出]`。
+  - 并入，j = 1～4：输入 `[vault, a×j, fee]`，输出 `[vault, change, 聚合者 OP_RETURN, caboose]`。这和 vault 并入 leaf 的模板相同，vault 的树因此从 1 个 leaf 变成 5 个（迁移，加上并入 j = 1～4）。
+  - 每个 a_L 输入的检查：
+    - 模板里 a 的位置全部是 a_L，最后一个输入（fee）不是 a_L；
+    - 除了合并交易的 out0，任何输出都不是 a_L。vault 的 leaf 允许任意 segwit change，所以"并入时 change 付给 a_L"只能由 a 来拦；
+    - 合并：out0 是 a_L，金额 == Σa；
+    - 并入：in0 的 spk == P，out0 − in0 == Σa；S′ 长 73 字节，H(S′) 等于 caboose 里的哈希，S′ 的头部等于 `MAGIC ‖ 01 ‖ ACTIVE ‖ L`。
+  - Schnorr trick 的调整方式：合并交易改聚合者 OP_RETURN 末尾的 4 字节 nonce，并入交易改 caboose 的 r。因此聚合者 OP_RETURN 的格式是 `聚合者 L2 地址 ‖ nonce`，SNARK 解析时要允许末尾这 4 个字节。a 不检查这个输出。
+  - 存款的构造器：每个 `a_L(v)` 后面紧跟 `OP_RETURN(收款地址)`。收款地址的格式（长度、版本前缀）仍待定。
+  - 大小（模拟器实测）：
+
+    | | leaf | 整笔交易 |
+    |---|---|---|
+    | 合并 j = 2 / 3 / 4 | 554 / 617 / 680 B | 834 / 1,270 / 1,780 vB |
+    | 并入 j = 1 / 2 / 3 / 4 | 724 / 787 / 850 / 914 B | 1,588 / 2,126 / 2,747 / 3,404 vB |
+
+    每多一个 a 输入，合并交易多 440～510 vB，并入交易多 540～660 vB。原因是每个 a 输入都要带一整套 SIGHASH_ALL 数据作为 hint，这套数据随输入个数增长；再加上 leaf 脚本和 control block。所以交易大小随 j 超线性增长。
 - **vault 不识别 a 的地址**：在脚本里算 taproot 地址需要 EC 运算，GSR 里没有。所以 vault 只把额外输入当作一般的资金流入，归属由 SNARK 判定。
 - **不需要谱系回溯**：SNARK 看到的是真实的交易图和真实金额。
   - 伪造的 a_L 只能装着伪造者自己的钱，它那棵子树会被 SNARK 隔离。
@@ -337,3 +355,4 @@ caboose = OP_RETURN PUSHBYTES_36 <H(state) ‖ LE32(r)>
 - 2026-09-28：多笔交易验证的并发问题采用选项 A，验证期间锁住 vault，并设超时和保证金。
 - 2026-09-28：program a 不做退款；合并和并入都 permissionless；失败情形由 vault 逃生通道处理。
 - 2026-09-28：caboose 沿用 spec envelope，`app_root` 改为 acc，规则为 `acc' = H(acc ‖ txid(父交易))`。
+- 2026-09-28：存款线按固定模板实现（合并 j = 2～4，并入 j = 1～4），a 的输入下标作为 hint 传入；并入要求 vault 余额恰好增加 Σa。
