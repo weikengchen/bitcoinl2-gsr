@@ -122,15 +122,47 @@
   - identity 和 deposit 两组测试共用 `tests/common/` 里的钱包和模拟器环境。
 - **大小**：见 design §6。并入 j = 1 时整笔交易 1,588 vB，j = 4 时 3,404 vB；合并 j = 2 时 834 vB。
 
-### P4b 剩余：锁定、验证、提款、超时（下一步）
+### P4b 锁定、完成、超时 —— 完成（2026-09-28）
 
-- 按 spec v0.1.0 加上已定的偏离：
-  - envelope 格式不变；`app_root = H(acc ‖ mode ‖ 模式相关数据)`。
-  - caboose 用裸 OP_RETURN。
-  - 两代回溯，分创世和延续两个分支。
-  - 每次迁移 `acc' = H(acc ‖ txid(父交易))`。
-- 迁移类型：锁定（VERIFYING，保证金，nLockTime = h）；验证步骤；完成提款（退还保证金，提款用 operator CHECKSIG 占位）；超时（单独的 leaf，CLTV ≥ h + N）。
-- 测试：覆盖 `verification-cases.md` 中的 G/L/A/E/V 各组用例。
+- **设计**：见 design §8.4"实现"和 §4.3 第 3、4 条。
+  - vault 的树有 8 个 leaf：普通迁移，并入 j = 1～4，锁定，完成，超时。
+  - 应用状态加入 B_min、N，VERIFYING 时再加锁定信息。
+  - 新状态改为由脚本构造，不再作为 hint。
+  - 证明用 operator 签名占位，b 的地址先用占位地址。
+- **simulator**：`Database::set_height`，按共识检查 nLockTime 是否生效。时间型 nLockTime 不模拟，按"未生效"处理。
+- **测试 `vault/tests/verify.rs`**：6 项全部通过。反例的做法同 deposit：单独执行 vault 输入，断言失败的 opcode。
+  - 锁定 → 完成：提款付给 b，保证金退回，参数更新。之后 vault 能继续并入；新的 B_min 生效，低于它的锁定会被拒绝。
+  - 锁定的规则：
+    - 保证金低于 B_min；
+    - vault 增加的金额与记录的保证金不一致；
+    - nLockTime 是时间型；
+    - 状态里的 h 与 nLockTime 不一致；
+    - 高度 H 时锁定交易还没有生效。
+  - 锁定期间：普通迁移、并入、再次锁定都被拒绝；未锁定的 vault 不能执行"完成"。
+  - 完成的规则：
+    - 签名的不是 operator；
+    - 提款没有付给 b；
+    - witness 里的清单与 OP_RETURN 的哈希不一致；
+    - vault 多付出 1 sat；
+    - 退款少 1 sat；
+    - 退款地址不是记录的那个。
+  - 退款地址设成 P 时，完成交易被拒绝，只能等超时（防止 vault 被冻结）。
+  - 超时：
+    - nLockTime = h + N − 1 时 CLTV 失败；
+    - nLockTime = h + N 时，高度 h + N 还没有生效，高度 h + N + 1 才可以；
+    - 不能拿走保证金，不能改参数；
+    - 超时之后可以再次锁定并完成。
+- identity 测试随新状态的构造方式做了调整：E04 在构造上已经不可能发生，因此删掉；新增一项"普通迁移不能改参数"。
+- **全部测试**：workspace 共 48 项，全部通过。
+- **大小**：锁定 1,085 vB，完成 1,369 vB，超时 1,090 vB，普通迁移 1,068 vB；leaf 2.3～2.7 KB。
+
+### P4c 以后（未排期）
+
+- 真正的验证器确定之后：
+  - 加入多步验证的迁移，以及它的进度字段；
+  - 把语句定下来：acc、R、W、H(清单)、新参数、L1 链尖；
+  - L1 链尖的记录（design §6，方案 A 第 4 条）还没有实现。
+- 覆盖 `verification-cases.md` 中剩下的 V 组用例。
 
 ### P5b program b
 

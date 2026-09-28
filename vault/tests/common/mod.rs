@@ -3,13 +3,17 @@
 
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
+use bitcoin::key::Keypair;
 use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, CompressedPublicKey, OutPoint, ScriptBuf, Transaction, TxOut, Witness};
 use bitcoin_simulator::database::Database;
-use bitcoinl2_vault::state::{AppState, State, MODE_NORMAL};
-use bitcoinl2_vault::tx::{input, Plan, Vault};
+use bitcoin_simulator::spending_requirements::P2TRChecker;
+use bitcoinl2_vault::leaf::{Kind, VaultConfig};
+use bitcoinl2_vault::program_a::ProgramA;
+use bitcoinl2_vault::state::{AppState, Mode, Params, State};
+use bitcoinl2_vault::tx::{input, op_return, Plan, Vault};
 
 pub struct Wallet {
     pub sk: SecretKey,
@@ -40,10 +44,13 @@ impl Wallet {
 
 /// A funded world. `f` has 8 wallet outputs (within the parser bounds, so it can be
 /// the grandparent of a first transition); `fees` pays the fee inputs.
+/// `operator` signs completions (the proof placeholder); `b` stands in for program b.
 pub struct World {
     pub db: Database,
     pub vault: Vault,
     pub wallet: Wallet,
+    pub operator: Keypair,
+    pub b: Wallet,
     pub f: Transaction,
     pub fees: Transaction,
     next_f: u32,
@@ -64,7 +71,11 @@ impl World {
         let db = Database::connect_temporary_database().unwrap();
         db.insert_transaction_unconditionally(&f).unwrap();
         db.insert_transaction_unconditionally(&fees).unwrap();
-        Self { db, vault: Vault::new().unwrap(), wallet, f, fees, next_f: 0, next_fee: 0 }
+        let operator = Keypair::from_seckey_slice(&Secp256k1::new(), &[6; 32]).unwrap();
+        let b = Wallet::new(7);
+        let config = VaultConfig { operator: operator.x_only_public_key().0, b_spk: b.spk() };
+        let vault = Vault::new(config).unwrap();
+        Self { db, vault, wallet, operator, b, f, fees, next_f: 0, next_fee: 0 }
     }
 
     /// The next unused output of `f`.
@@ -82,7 +93,7 @@ impl World {
     }
 
     pub fn app0() -> AppState {
-        AppState { acc: [0xab; 32], mode: MODE_NORMAL }
+        AppState { acc: [0xab; 32], params: Params { b_min: 10_000, n: 144 }, mode: Mode::Normal }
     }
 
     /// T0 funded by one coin: `[P(20,000), change, caboose]`.
@@ -129,4 +140,94 @@ impl World {
 
 pub fn err(r: anyhow::Result<Transaction>) -> String {
     r.expect_err("the transition must be rejected").to_string()
+}
+
+/// Input `idx` fails inside its script with `want`.
+pub fn rejects(tx: &Transaction, prevouts: &[TxOut], idx: usize, want: &str) {
+    let e = P2TRChecker::check(tx, prevouts, idx).expect_err("the input must be rejected").to_string();
+    assert!(e.contains(&format!("Some({want})")), "input {idx}: {e}");
+}
+
+pub const AGGREGATOR: &[u8] = b"aggregator L2 address";
+
+pub fn aggregator_out() -> TxOut {
+    op_return(AGGREGATOR.to_vec())
+}
+
+/// A vault line after its first transition, and its deposit program a_L.
+pub struct Line {
+    pub id: [u8; 32],
+    pub a: ProgramA,
+    pub grand: Transaction,
+    pub parent: Transaction,
+    pub state: State,
+    pub app: AppState,
+}
+
+impl Line {
+    pub fn new(w: &mut World) -> Self {
+        let (t0, s0) = w.genesis();
+        let a0 = World::app0();
+        let p1 = w.plan_f(&t0, &s0, &a0);
+        let t1 = w.accept(&p1);
+        let id = t0.compute_txid().to_byte_array();
+        let a = ProgramA::new(id, &w.vault.script_pubkey()).unwrap();
+        Self { id, a, grand: t0, parent: t1, state: p1.new_state, app: p1.new_app }
+    }
+
+    pub fn balance(&self) -> u64 {
+        self.parent.output[0].value.to_sat()
+    }
+
+    /// The honest plan folding `deposits` (a plain transition if there are none).
+    /// The other kinds start from `plan(w, vec![])`.
+    pub fn plan(&self, w: &mut World, deposits: Vec<(OutPoint, TxOut)>) -> Plan {
+        let p = w.plan(&self.parent, &self.grand, &self.state, &self.app);
+        if deposits.is_empty() {
+            p
+        } else {
+            w.vault.with_deposits(p, deposits, aggregator_out())
+        }
+    }
+
+    /// `plan` with `a` signing the deposit inputs, the operator a completion,
+    /// and the wallet the fee input.
+    pub fn build(w: &World, a: &ProgramA, plan: &Plan) -> Transaction {
+        let mut x = match plan.kind {
+            Kind::Fold(_) => a.fold_tx(&w.vault, plan),
+            Kind::Complete => w.vault.build_complete(plan, &w.operator),
+            _ => w.vault.build(plan),
+        };
+        let fee = x.input.len() - 1;
+        w.wallet.sign(&mut x, fee, &plan.fee_prevout);
+        x
+    }
+
+    pub fn accept(&mut self, w: &World, plan: &Plan) -> Transaction {
+        let x = Self::build(w, &self.a, plan);
+        w.db.verify_transaction(&x).unwrap();
+        w.db.insert_transaction_unconditionally(&x).unwrap();
+        self.grand = std::mem::replace(&mut self.parent, x.clone());
+        self.state = plan.new_state;
+        self.app = plan.new_app;
+        x
+    }
+}
+
+/// One deposit transaction paying each of `values` to `a`, each a output followed
+/// by its recipient OP_RETURN. Returns the a outputs.
+pub fn deposit(w: &mut World, a: &ProgramA, values: &[u64]) -> Vec<(OutPoint, TxOut)> {
+    let (coin, prevout) = w.fee_coin();
+    let mut output = vec![];
+    for (i, v) in values.iter().enumerate() {
+        output.extend(a.deposit_outputs(Amount::from_sat(*v), &[i as u8 + 1; 20]));
+    }
+    let total: u64 = values.iter().sum();
+    output.push(w.wallet.out(prevout.value.to_sat() - total - 1_000));
+    let mut d = Transaction { version: Version::TWO, lock_time: LockTime::ZERO, input: vec![input(coin)], output };
+    w.wallet.sign(&mut d, 0, &prevout);
+    w.db.verify_transaction(&d).unwrap();
+    w.db.insert_transaction_unconditionally(&d).unwrap();
+    let txid = d.compute_txid();
+    (0..values.len()).map(|i| (OutPoint::new(txid, 2 * i as u32), d.output[2 * i].clone())).collect()
 }

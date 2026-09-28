@@ -6,9 +6,9 @@ mod common;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, OutPoint, Transaction, TxIn, TxOut};
-use bitcoinl2_vault::state::{caboose, Phase, State};
-use bitcoinl2_vault::tx::{input, Vault};
+use bitcoin::{Amount, OutPoint, Transaction, TxOut};
+use bitcoinl2_vault::state::{caboose, AppState, Lock, Mode, Params, Phase, State};
+use bitcoinl2_vault::tx::input;
 use common::{err, World};
 
 /// G01, G09, A08: genesis, first transition, and continuations; id = txid(T0) forever.
@@ -74,7 +74,6 @@ fn counterfeit_active_output() {
         // keep the copied id (the attacker's goal) ...
         let mut p = w.plan_f(&c, &fake, &a);
         p.new_state.phase = Phase::Active { genesis_id: id };
-        p.hints.new_state = p.new_state.encode();
         assert!(w.check(&p).is_err());
         // ... or take the fresh id: the old state is still not GENESIS.
         let p = w.plan_f(&c, &fake, &a);
@@ -107,20 +106,19 @@ fn first_transition_identity() {
 
     let mut wrong_id = w.plan_f(&t0, &s0, &a0);
     wrong_id.new_state.phase = Phase::Active { genesis_id: [0x55; 32] };
-    wrong_id.hints.new_state = wrong_id.new_state.encode();
     assert!(w.check(&wrong_id).is_err());
 
     let mut still_genesis = w.plan_f(&t0, &s0, &a0);
     still_genesis.new_state.phase = Phase::Genesis;
-    still_genesis.hints.new_state = still_genesis.new_state.encode();
     assert!(w.check(&still_genesis).is_err());
 
     let ok = w.plan_f(&t0, &s0, &a0);
     w.check(&ok).unwrap();
 }
 
-/// G08, acc rule, mode, E04: a continuation keeps the id, follows the acc rule,
-/// and commits to exactly the state it reveals.
+/// G08, acc rule, mode, parameters: a continuation keeps the id, follows the acc
+/// rule and keeps the mode and parameters. (E04 holds by construction: the leaf
+/// builds the new state instead of taking it as a hint.)
 #[test]
 fn continuation_rules() {
     let mut w = World::new(20);
@@ -132,29 +130,20 @@ fn continuation_rules() {
 
     let mut changed_id = honest(&mut w);
     changed_id.new_state.phase = Phase::Active { genesis_id: [0x01; 32] };
-    changed_id.hints.new_state = changed_id.new_state.encode();
     assert!(w.check(&changed_id).is_err());
 
     let mut bad_acc = honest(&mut w);
-    bad_acc.new_app.acc = [0x02; 32];
-    bad_acc.new_state.app_root = bad_acc.new_app.root();
-    bad_acc.hints.new_app = bad_acc.new_app.encode();
-    bad_acc.hints.new_state = bad_acc.new_state.encode();
+    bad_acc.set_app(AppState { acc: [0x02; 32], ..bad_acc.new_app });
     assert!(w.check(&bad_acc).is_err());
 
     let mut bad_mode = honest(&mut w);
-    bad_mode.new_app.mode = 1;
-    bad_mode.new_state.app_root = bad_mode.new_app.root();
-    bad_mode.hints.new_app = bad_mode.new_app.encode();
-    bad_mode.hints.new_state = bad_mode.new_state.encode();
+    let lock = Lock { height: 0, bond: 0, locker: [0; 32], refund_hash: [0; 32] };
+    bad_mode.set_app(AppState { mode: Mode::Verifying(lock), ..bad_mode.new_app });
     assert!(w.check(&bad_mode).is_err());
 
-    // E04: reveal a state other than the committed one
-    let mut mismatch = honest(&mut w);
-    let mut other = mismatch.new_state;
-    other.app_root = [0x03; 32];
-    mismatch.hints.new_state = other.encode();
-    assert!(w.check(&mismatch).is_err());
+    let mut bad_params = honest(&mut w);
+    bad_params.set_app(AppState { params: Params { b_min: 1, n: 1 }, ..bad_params.new_app });
+    assert!(w.check(&bad_params).is_err());
 
     let ok = honest(&mut w);
     w.check(&ok).unwrap();
@@ -248,8 +237,10 @@ fn clone_gets_its_own_id() {
 }
 
 #[test]
-fn leaf_has_no_op_success() {
-    let v = Vault::new().unwrap();
-    gsr_gadgets::leaf::assert_no_op_success(&v.tree.scripts[0]).unwrap();
-    let _ = TxIn::default();
+fn leaves_have_no_op_success() {
+    let w = World::new(0);
+    for (i, kind) in w.vault.kinds.iter().enumerate() {
+        gsr_gadgets::leaf::assert_no_op_success(&w.vault.tree.scripts[i]).unwrap();
+        eprintln!("vault leaf {kind:?}: {} bytes", w.vault.tree.scripts[i].len());
+    }
 }

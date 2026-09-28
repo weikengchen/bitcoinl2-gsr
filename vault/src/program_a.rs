@@ -14,12 +14,11 @@
 
 use crate::leaf::{caboose_hash, eq, eq_const, left, neq, op, ops, sha256, size_eq, spk_of_output, TX_VERSION};
 use crate::state::{State, ENVELOPE_VERSION, MAGIC, PHASE_ACTIVE};
-use crate::tx::{input, Plan, Vault};
+use crate::tx::{input, op_return, Plan, Vault};
 use anyhow::Result;
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::serialize;
 use bitcoin::opcodes::all::*;
-use bitcoin::script::PushBytesBuf;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Witness};
 use gsr_gadgets::leaf::V2Tree;
@@ -143,11 +142,6 @@ pub fn a_leaf(shape: AShape, l2_id: &[u8; 32], vault_spk: &ScriptBuf) -> Script 
     s.apply(drop_n(left_over), left_over, &[]);
     s.push(op(OP_PUSHNUM_1), "ok");
     s.script()
-}
-
-fn op_return(data: Vec<u8>) -> TxOut {
-    let data = PushBytesBuf::try_from(data).expect("OP_RETURN data too long");
-    TxOut { value: Amount::ZERO, script_pubkey: ScriptBuf::new_op_return(data) }
 }
 
 pub struct ProgramA {

@@ -1,12 +1,17 @@
 //! Building vault transactions and their witnesses.
 
-use crate::leaf::{vault_leaf, Template, SEQUENCE};
-use crate::state::{caboose, AppState, Phase, State};
+use crate::leaf::{vault_leaf, Kind, VaultConfig, SEQUENCE};
+use crate::state::{caboose, sha256, AppState, Lock, Mode, Params, Phase, State};
 use anyhow::{bail, Result};
 use bitcoin::absolute::LockTime;
+use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
+use bitcoin::key::Keypair;
+use bitcoin::script::PushBytesBuf;
+use bitcoin::secp256k1::{Message, Secp256k1};
+use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TapLeafHash, Transaction, TxIn, TxOut, Witness};
 use gsr_gadgets::leaf::V2Tree;
 use gsr_gadgets::parse::tx_blob;
 use gsr_gadgets::schnorr::schnorr_trick_hints;
@@ -21,57 +26,84 @@ pub fn input(prevout: OutPoint) -> TxIn {
     }
 }
 
-/// Hint bytes of a transition, in the leaf's consumption order after the
-/// SIGHASH_ALL and Schnorr-trick hints.
+/// An amount-0 `OP_RETURN <data>` output.
+pub fn op_return(data: Vec<u8>) -> TxOut {
+    let data = PushBytesBuf::try_from(data).expect("OP_RETURN data too long");
+    TxOut { value: Amount::ZERO, script_pubkey: ScriptBuf::new_op_return(data) }
+}
+
+/// Hint bytes of a vault transaction, in the leaf's consumption order after the
+/// SIGHASH_ALL and Schnorr-trick hints. A completion's operator signature is
+/// added when building (it signs the final transaction).
 #[derive(Clone, Debug)]
 pub struct TransitionHints {
     pub parent: Vec<u8>,
     pub old_state: Vec<u8>,
     pub old_app: Vec<u8>,
-    pub new_state: Vec<u8>,
-    pub new_app: Vec<u8>,
+    /// The kind's own hints: a lock's data; a completion's new parameters and withdrawal list.
+    pub extra: Vec<Vec<u8>>,
     pub grandparent: Vec<u8>,
+}
+
+/// A withdrawal batch (design §7): `amount` goes to program b, whose Merkle-sum
+/// root is `root`; `list` is published in the completion's witness.
+#[derive(Clone, Debug)]
+pub struct Withdrawal {
+    pub amount: Amount,
+    pub root: [u8; 32],
+    pub list: Vec<u8>,
 }
 
 /// Everything needed to build a vault transaction; tests tamper with it.
 #[derive(Clone, Debug)]
 pub struct Plan {
-    pub template: Template,
+    pub kind: Kind,
     pub vault_in: OutPoint,
     pub vault_prevout: TxOut,
     /// Deposit inputs (between the vault input and the fee input).
     pub deposits: Vec<(OutPoint, TxOut)>,
     pub fee_in: OutPoint,
     pub fee_prevout: TxOut,
+    pub lock_time: u32,
     pub successor: TxOut,
     pub change: TxOut,
-    /// The aggregator OP_RETURN output of templates that have one.
-    pub aggregator: Option<TxOut>,
+    /// Outputs between the change and the caboose (see [Kind]).
+    pub extra_outputs: Vec<TxOut>,
     /// State committed by the new caboose.
     pub new_state: State,
     pub new_app: AppState,
     pub hints: TransitionHints,
 }
 
-/// Deposit inputs a fold template can take.
+impl Plan {
+    /// Set the new application state, and the state the caboose commits to.
+    pub fn set_app(&mut self, app: AppState) {
+        self.new_app = app;
+        self.new_state.app_root = app.root();
+    }
+}
+
+/// Deposit inputs a fold can take.
 pub const MAX_FOLD_DEPOSITS: usize = 4;
 
 pub struct Vault {
     pub tree: V2Tree,
-    pub templates: Vec<Template>,
+    pub kinds: Vec<Kind>,
+    pub config: VaultConfig,
 }
 
 impl Vault {
-    /// Leaves: the transition, and folds of 1..=MAX_FOLD_DEPOSITS deposits.
-    pub fn new() -> Result<Self> {
-        let mut templates = vec![Template::TRANSITION];
-        templates.extend((1..=MAX_FOLD_DEPOSITS).map(Template::fold));
-        let tree = V2Tree::new(templates.iter().map(|t| vault_leaf(*t)).collect())?;
-        Ok(Self { tree, templates })
+    /// Leaves: plain, folds of 1..=MAX_FOLD_DEPOSITS deposits, lock, complete, timeout.
+    pub fn new(config: VaultConfig) -> Result<Self> {
+        let mut kinds = vec![Kind::Plain];
+        kinds.extend((1..=MAX_FOLD_DEPOSITS).map(Kind::Fold));
+        kinds.extend([Kind::Lock, Kind::Complete, Kind::Timeout]);
+        let tree = V2Tree::new(kinds.iter().map(|k| vault_leaf(*k, &config)).collect())?;
+        Ok(Self { tree, kinds, config })
     }
 
-    pub fn leaf_index(&self, t: Template) -> usize {
-        self.templates.iter().position(|x| *x == t).expect("template has a leaf")
+    pub fn leaf_index(&self, kind: Kind) -> usize {
+        self.kinds.iter().position(|x| *x == kind).expect("kind has a leaf")
     }
 
     /// The main-program scriptPubKey P.
@@ -90,8 +122,8 @@ impl Vault {
         (tx, state)
     }
 
-    /// The honest plan for spending `parent`'s vault output. `grandparent` created the
-    /// output spent by `parent`'s input 0.
+    /// The honest plain transition spending `parent`'s vault output. `grandparent`
+    /// created the output spent by `parent`'s input 0. The other kinds start from it.
     pub fn plan(
         &self,
         parent: &Transaction,
@@ -117,36 +149,74 @@ impl Vault {
         let new_app = old_app.next(parent_txid);
         let new_state = State { phase: Phase::Active { genesis_id }, app_root: new_app.root() };
         Ok(Plan {
-            template: Template::TRANSITION,
+            kind: Kind::Plain,
             vault_in: OutPoint::new(parent_txid, 0),
             vault_prevout: parent.output[0].clone(),
             deposits: vec![],
             fee_in: fee.0,
             fee_prevout: fee.1,
+            lock_time: 0,
             successor: parent.output[0].clone(),
             change,
-            aggregator: None,
+            extra_outputs: vec![],
             new_state,
             new_app,
             hints: TransitionHints {
                 parent: tx_blob(parent),
                 old_state: old_state.encode(),
                 old_app: old_app.encode(),
-                new_state: new_state.encode(),
-                new_app: new_app.encode(),
+                extra: vec![],
                 grandparent: tx_blob(grandparent),
             },
         })
     }
 
-    /// Turn an honest transition plan into a fold of `deposits` (the vault
-    /// amount grows by their total).
+    /// Fold `deposits` (the vault grows by their total).
     pub fn with_deposits(&self, mut plan: Plan, deposits: Vec<(OutPoint, TxOut)>, aggregator: TxOut) -> Plan {
         let total: u64 = deposits.iter().map(|d| d.1.value.to_sat()).sum();
-        plan.template = Template::fold(deposits.len());
+        plan.kind = Kind::Fold(deposits.len());
         plan.successor.value += Amount::from_sat(total);
         plan.deposits = deposits;
-        plan.aggregator = Some(aggregator);
+        plan.extra_outputs = vec![aggregator];
+        plan
+    }
+
+    /// Lock the vault for verification at height `height` (the nLockTime): the
+    /// vault grows by `bond`, which is refunded to `refund` on completion.
+    pub fn lock(&self, mut plan: Plan, height: u32, bond: Amount, locker: [u8; 32], refund: &ScriptBuf) -> Plan {
+        let lock = Lock { height, bond: bond.to_sat(), locker, refund_hash: sha256(&serialize(refund)) };
+        plan.kind = Kind::Lock;
+        plan.lock_time = height;
+        plan.successor.value += bond;
+        plan.hints.extra = vec![lock.data()];
+        plan.set_app(AppState { mode: Mode::Verifying(lock), ..plan.new_app });
+        plan
+    }
+
+    /// Complete a verification: pay `withdrawal` to program b, refund the bond
+    /// to `refund` (whose hash the lock recorded) and set the new `params`.
+    pub fn complete(&self, mut plan: Plan, withdrawal: &Withdrawal, refund: ScriptBuf, params: Params) -> Plan {
+        let Mode::Verifying(lock) = plan.new_app.mode else { panic!("the vault is not locked") };
+        let bond = Amount::from_sat(lock.bond);
+        plan.kind = Kind::Complete;
+        plan.successor.value = plan.successor.value - withdrawal.amount - bond;
+        let mut data = withdrawal.root.to_vec();
+        data.extend(sha256(&withdrawal.list));
+        plan.extra_outputs = vec![
+            TxOut { value: withdrawal.amount, script_pubkey: self.config.b_spk.clone() },
+            op_return(data),
+            TxOut { value: bond, script_pubkey: refund },
+        ];
+        plan.hints.extra = vec![params.encode(), withdrawal.list.clone()];
+        plan.set_app(AppState { params, mode: Mode::Normal, ..plan.new_app });
+        plan
+    }
+
+    /// Time a lock out with nLockTime `lock_time` (at least h + N); the bond stays in the vault.
+    pub fn timeout(&self, mut plan: Plan, lock_time: u32) -> Plan {
+        plan.kind = Kind::Timeout;
+        plan.lock_time = lock_time;
+        plan.set_app(AppState { mode: Mode::Normal, ..plan.new_app });
         plan
     }
 
@@ -156,9 +226,14 @@ impl Vault {
         inputs.extend(plan.deposits.iter().map(|d| input(d.0)));
         inputs.push(input(plan.fee_in));
         let mut outputs = vec![plan.successor.clone(), plan.change.clone()];
-        outputs.extend(plan.aggregator.clone());
+        outputs.extend(plan.extra_outputs.iter().cloned());
         outputs.push(caboose(&plan.new_state, r));
-        Transaction { version: Version::TWO, lock_time: LockTime::ZERO, input: inputs, output: outputs }
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::from_consensus(plan.lock_time),
+            input: inputs,
+            output: outputs,
+        }
     }
 
     pub fn prevouts(plan: &Plan) -> Vec<TxOut> {
@@ -168,22 +243,23 @@ impl Vault {
         v
     }
 
-    /// The vault input's witness for `tx`, or `None` if the Schnorr trick needs a new `r`.
-    pub fn vault_witness(&self, plan: &Plan, tx: &Transaction) -> Option<Witness> {
-        let leaf = self.leaf_index(plan.template);
-        let data = SighashAllData::new(tx, &Self::prevouts(plan), 0, self.tree.leaf_hash(leaf));
+    /// The vault input's witness for `tx`, or `None` if the Schnorr trick needs a
+    /// new `r`. A completion carries the signature of `operator`.
+    pub fn vault_witness(&self, plan: &Plan, tx: &Transaction, operator: Option<&Keypair>) -> Option<Witness> {
+        let leaf = self.leaf_index(plan.kind);
+        let leaf_hash = self.tree.leaf_hash(leaf);
+        let prevouts = Self::prevouts(plan);
+        let data = SighashAllData::new(tx, &prevouts, 0, leaf_hash);
         let trick = schnorr_trick_hints(&data.preimage()).ok()?;
         let h = &plan.hints;
         let mut hints = data.hints();
         hints.extend(trick);
-        hints.extend([
-            h.parent.clone(),
-            h.old_state.clone(),
-            h.old_app.clone(),
-            h.new_state.clone(),
-            h.new_app.clone(),
-            h.grandparent.clone(),
-        ]);
+        hints.extend([h.parent.clone(), h.old_state.clone(), h.old_app.clone()]);
+        hints.extend(h.extra.iter().cloned());
+        if let Some(key) = operator {
+            hints.push(operator_signature(tx, &prevouts, leaf_hash, key));
+        }
+        hints.push(h.grandparent.clone());
         Some(self.tree.witness(leaf, &hints))
     }
 
@@ -196,9 +272,29 @@ impl Vault {
         plan: &Plan,
         deposit_witness: impl Fn(&Transaction, usize) -> Option<Witness>,
     ) -> Transaction {
+        self.build_inner(plan, deposit_witness, None)
+    }
+
+    /// Build a transaction without deposit inputs (see [Vault::build_with]).
+    pub fn build(&self, plan: &Plan) -> Transaction {
+        assert!(plan.deposits.is_empty(), "use build_with for folds");
+        self.build_inner(plan, |_, _| None, None)
+    }
+
+    /// Build a completion; `operator`'s signature stands in for the proof.
+    pub fn build_complete(&self, plan: &Plan, operator: &Keypair) -> Transaction {
+        self.build_inner(plan, |_, _| None, Some(operator))
+    }
+
+    fn build_inner(
+        &self,
+        plan: &Plan,
+        deposit_witness: impl Fn(&Transaction, usize) -> Option<Witness>,
+        operator: Option<&Keypair>,
+    ) -> Transaction {
         for r in 0u32.. {
             let mut tx = self.unsigned(plan, r);
-            let Some(w) = self.vault_witness(plan, &tx) else { continue };
+            let Some(w) = self.vault_witness(plan, &tx, operator) else { continue };
             let deposits: Option<Vec<Witness>> =
                 (1..=plan.deposits.len()).map(|i| deposit_witness(&tx, i)).collect();
             let Some(deposits) = deposits else { continue };
@@ -210,10 +306,13 @@ impl Vault {
         }
         unreachable!()
     }
+}
 
-    /// Build a transaction without deposit inputs (see [Vault::build_with]).
-    pub fn build(&self, plan: &Plan) -> Transaction {
-        assert!(plan.deposits.is_empty(), "use build_with for folds");
-        self.build_with(plan, |_, _| None)
-    }
+/// BIP 340 signature (SIGHASH_DEFAULT) of input 0 of `tx` spending the leaf `leaf_hash`.
+fn operator_signature(tx: &Transaction, prevouts: &[TxOut], leaf_hash: TapLeafHash, key: &Keypair) -> Vec<u8> {
+    let sighash = SighashCache::new(tx)
+        .taproot_script_spend_signature_hash(0, &Prevouts::All(prevouts), leaf_hash, TapSighashType::Default)
+        .expect("sighash");
+    let msg = Message::from_digest(sighash.to_byte_array());
+    Secp256k1::new().sign_schnorr_no_aux_rand(&msg, key).as_ref().to_vec()
 }

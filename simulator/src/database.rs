@@ -5,22 +5,25 @@ use bitcoin_scriptexec::v2::varops;
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
 use rusqlite::{params, Connection};
+use std::cell::Cell;
 use std::path::Path;
 
 pub struct Database {
     pub conn: Connection,
+    /// Height of the block that transactions are checked for inclusion in.
+    height: Cell<u32>,
 }
 
 impl Database {
     pub fn connect<P: AsRef<Path>>(path: P) -> Result<Database> {
         let conn = Connection::open(path)?;
 
-        Ok(Database { conn })
+        Ok(Database { conn, height: Cell::new(0) })
     }
 
     pub fn connect_temporary_database() -> Result<Database> {
         let conn = Connection::open_in_memory()?;
-        let db = Database { conn };
+        let db = Database { conn, height: Cell::new(0) };
         db.reset()?;
 
         Ok(db)
@@ -220,7 +223,32 @@ impl Database {
         Ok(())
     }
 
+    /// Check transactions for inclusion in a block at `height` (nLockTime finality).
+    pub fn set_height(&self, height: u32) {
+        self.height.set(height);
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height.get()
+    }
+
     pub fn verify_transaction(&self, tx: &Transaction) -> Result<()> {
+        // Consensus finality (IsFinalTx) in a block at `height`. There is no clock,
+        // so a time-based nLockTime is never final unless every sequence is final.
+        let lock_time = tx.lock_time.to_consensus_u32();
+        let locked = match lock_time {
+            0 => false,
+            t if t < bitcoin::absolute::LOCK_TIME_THRESHOLD => t >= self.height.get(),
+            _ => true,
+        };
+        if locked && tx.input.iter().any(|i| !i.sequence.is_final()) {
+            return Err(Error::msg(format!(
+                "The transaction is not final at height {} (nLockTime {}).",
+                self.height.get(),
+                lock_time
+            )));
+        }
+
         let mut prev_outs = vec![];
         for input in tx.input.iter() {
             assert_eq!(

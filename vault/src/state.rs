@@ -11,6 +11,8 @@ pub const PHASE_GENESIS: u8 = 0x00;
 pub const PHASE_ACTIVE: u8 = 0x01;
 /// Application mode byte: normal operation.
 pub const MODE_NORMAL: u8 = 0x00;
+/// Application mode byte: locked for verifying a withdrawal proof (design §8.4).
+pub const MODE_VERIFYING: u8 = 0x01;
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
@@ -60,17 +62,77 @@ impl State {
     }
 }
 
-/// The application state committed by `app_root`.
+/// Protocol parameters; only a completed verification changes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Params {
+    /// Minimum bond for locking the vault, in sats.
+    pub b_min: u64,
+    /// A lock at height h can be timed out from height h + n.
+    pub n: u32,
+}
+
+impl Params {
+    /// `LE64(b_min) || LE32(n)`
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = self.b_min.to_le_bytes().to_vec();
+        v.extend(self.n.to_le_bytes());
+        v
+    }
+}
+
+/// What a lock records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lock {
+    /// nLockTime of the lock transaction.
+    pub height: u32,
+    /// Sats added to the vault by the lock, refunded on completion.
+    pub bond: u64,
+    /// The locker's L2 reward address.
+    pub locker: [u8; 32],
+    /// SHA256 of the compact-size-prefixed scriptPubKey that receives the refund.
+    pub refund_hash: [u8; 32],
+}
+
+impl Lock {
+    /// `LE64(bond) || locker || refund_hash`: the part the locker chooses.
+    pub fn data(&self) -> Vec<u8> {
+        let mut v = self.bond.to_le_bytes().to_vec();
+        v.extend(self.locker);
+        v.extend(self.refund_hash);
+        v
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Verifying(Lock),
+}
+
+/// The application state committed by `app_root`:
+/// `acc || mode || params`, followed in VERIFYING mode by `LE32(height) || lock data`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppState {
     pub acc: [u8; 32],
-    pub mode: u8,
+    pub params: Params,
+    pub mode: Mode,
 }
 
 impl AppState {
+    pub const NORMAL_LEN: usize = 45;
+    pub const VERIFYING_LEN: usize = 121;
+
     pub fn encode(&self) -> Vec<u8> {
         let mut v = self.acc.to_vec();
-        v.push(self.mode);
+        match self.mode {
+            Mode::Normal => v.push(MODE_NORMAL),
+            Mode::Verifying(_) => v.push(MODE_VERIFYING),
+        }
+        v.extend(self.params.encode());
+        if let Mode::Verifying(lock) = self.mode {
+            v.extend(lock.height.to_le_bytes());
+            v.extend(lock.data());
+        }
         v
     }
 
@@ -78,11 +140,11 @@ impl AppState {
         sha256(&self.encode())
     }
 
-    /// `acc' = SHA256(acc || txid(parent))`, txid in internal byte order.
+    /// `acc' = SHA256(acc || txid(parent))`, txid in internal byte order; the rest unchanged.
     pub fn next(&self, parent: Txid) -> AppState {
         let mut v = self.acc.to_vec();
         v.extend(parent.to_byte_array());
-        AppState { acc: sha256(&v), mode: self.mode }
+        AppState { acc: sha256(&v), ..*self }
     }
 }
 

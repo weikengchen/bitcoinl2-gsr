@@ -5,96 +5,13 @@
 mod common;
 
 use bitcoin::absolute::LockTime;
-use bitcoin::hashes::Hash;
-use bitcoin::script::PushBytesBuf;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut};
 use bitcoin_simulator::spending_requirements::P2TRChecker;
 use bitcoinl2_vault::program_a::{AShape, ProgramA, MAX_A_INPUTS};
-use bitcoinl2_vault::state::{caboose, AppState, Phase, State};
-use bitcoinl2_vault::tx::{input, Plan, Vault};
-use common::World;
-
-const AGGREGATOR: &[u8] = b"aggregator L2 address";
-
-fn aggregator_out() -> TxOut {
-    TxOut {
-        value: Amount::ZERO,
-        script_pubkey: ScriptBuf::new_op_return(PushBytesBuf::try_from(AGGREGATOR.to_vec()).unwrap()),
-    }
-}
-
-/// A vault line after its first transition, and its deposit program a_L.
-struct Line {
-    id: [u8; 32],
-    a: ProgramA,
-    grand: Transaction,
-    parent: Transaction,
-    state: State,
-    app: AppState,
-}
-
-impl Line {
-    fn new(w: &mut World) -> Self {
-        let (t0, s0) = w.genesis();
-        let a0 = World::app0();
-        let p1 = w.plan_f(&t0, &s0, &a0);
-        let t1 = w.accept(&p1);
-        let id = t0.compute_txid().to_byte_array();
-        let a = ProgramA::new(id, &w.vault.script_pubkey()).unwrap();
-        Self { id, a, grand: t0, parent: t1, state: p1.new_state, app: p1.new_app }
-    }
-
-    fn balance(&self) -> u64 {
-        self.parent.output[0].value.to_sat()
-    }
-
-    /// The honest plan folding `deposits` (a plain transition if there are none).
-    fn plan(&self, w: &mut World, deposits: Vec<(OutPoint, TxOut)>) -> Plan {
-        let p = w.plan(&self.parent, &self.grand, &self.state, &self.app);
-        if deposits.is_empty() {
-            p
-        } else {
-            w.vault.with_deposits(p, deposits, aggregator_out())
-        }
-    }
-
-    /// `plan` with `a` signing the deposit inputs and the wallet the fee input.
-    fn build(w: &World, a: &ProgramA, plan: &Plan) -> Transaction {
-        let mut x = if plan.deposits.is_empty() { w.vault.build(plan) } else { a.fold_tx(&w.vault, plan) };
-        let fee = x.input.len() - 1;
-        w.wallet.sign(&mut x, fee, &plan.fee_prevout);
-        x
-    }
-
-    fn accept(&mut self, w: &World, plan: &Plan) -> Transaction {
-        let x = Self::build(w, &self.a, plan);
-        w.db.verify_transaction(&x).unwrap();
-        w.db.insert_transaction_unconditionally(&x).unwrap();
-        self.grand = std::mem::replace(&mut self.parent, x.clone());
-        self.state = plan.new_state;
-        self.app = plan.new_app;
-        x
-    }
-}
-
-/// One deposit transaction paying each of `values` to `a`, each a output followed
-/// by its recipient OP_RETURN. Returns the a outputs.
-fn deposit(w: &mut World, a: &ProgramA, values: &[u64]) -> Vec<(OutPoint, TxOut)> {
-    let (coin, prevout) = w.fee_coin();
-    let mut output = vec![];
-    for (i, v) in values.iter().enumerate() {
-        output.extend(a.deposit_outputs(Amount::from_sat(*v), &[i as u8 + 1; 20]));
-    }
-    let total: u64 = values.iter().sum();
-    output.push(w.wallet.out(prevout.value.to_sat() - total - 1_000));
-    let mut d = Transaction { version: Version::TWO, lock_time: LockTime::ZERO, input: vec![input(coin)], output };
-    w.wallet.sign(&mut d, 0, &prevout);
-    w.db.verify_transaction(&d).unwrap();
-    w.db.insert_transaction_unconditionally(&d).unwrap();
-    let txid = d.compute_txid();
-    (0..values.len()).map(|i| (OutPoint::new(txid, 2 * i as u32), d.output[2 * i].clone())).collect()
-}
+use bitcoinl2_vault::state::{caboose, Phase, State};
+use bitcoinl2_vault::tx::{input, Vault};
+use common::{aggregator_out, deposit, rejects, Line, World, AGGREGATOR};
 
 /// Merge `inputs` with `a` and accept it; returns the new a output.
 fn merge(w: &mut World, a: &ProgramA, inputs: &[(OutPoint, TxOut)]) -> (OutPoint, TxOut) {
@@ -137,12 +54,6 @@ fn merge_edited(
         w.wallet.sign(&mut tx, inputs.len(), &fee.1);
     }
     (tx, prevouts)
-}
-
-/// Input `idx` fails inside its script with `want`.
-fn rejects(tx: &Transaction, prevouts: &[TxOut], idx: usize, want: &str) {
-    let e = P2TRChecker::check(tx, prevouts, idx).expect_err("the input must be rejected").to_string();
-    assert!(e.contains(&format!("Some({want})")), "input {idx}: {e}");
 }
 
 /// Deposit, merge twice (recursively), fold into the vault, and keep going.
