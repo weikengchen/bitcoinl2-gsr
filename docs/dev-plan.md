@@ -53,11 +53,27 @@
     - 双花会被拒绝。
     - 单个输入、两个输入各自超出 varops 预算时失败；交易 weight 足够大时同样的计算可以通过。
 
-### P3 基础 gadget（我们自己的 crate，放在 monorepo 下）
+### P3 基础 gadget —— 完成（2026-09-28），crate 为 `gadgets/`（`gsr-gadgets`）
 
 - SIGHASH_ALL（0x01）内省，覆盖全部输入向量（prevouts、amounts、scriptpubkeys、sequences）和 outputs，并检查 input_index。
 - G/G Schnorr trick，不做 grinding：s = e+1，末字节不是 0xff 时直接 1ADD。
 - txid 反射：整笔父交易作为一个 witness 元素传入，脚本用 SUBSTR 解析。
+- **结果**：写法沿用 covenants-gadgets，每个 gadget 都是"脚本 + Rust 端 hint 生成"两部分，hint 用 `OP_HINT` 从栈底取。
+  - `sighash`：`SighashAllGadget::build(n, m, input_index, version)`，从 hint 重建 SIGHASH_ALL 的签名消息。每个字段都做长度校验，保证 hint 对承诺向量的切分是唯一的。
+  - `schnorr`：`SchnorrTrickGadget::verify()`，用 G/G trick，对末字节做 1ADD。只有末字节为 0xff 时才需要调整交易（概率 1/256）。
+  - `tx`：`TxBuildGadget::build(n, m)`，从 hint 拼出父交易的非见证序列化并算出 txid。做法是由脚本插入计数和空 scriptSig，而不是去解析一个大元素，这样不会出现切分歧义。
+  - `leaf`：`V2Tree` 构造 NUMS 内部键下的 0xc2 树，并调用 `assert_no_op_success`，因为 `script!` 会把 0x81 编成 OP_1NEGATE，而它在 v2 里是 OP_SUCCESS。
+  - `pseudo`：`push_data`、`push_u64`，都是 v2 安全的常量 push。
+  - 测试 `tests/covenant.rs`，4 项全部通过：
+    - sighash 与 rust-bitcoin 的计算结果一致；
+    - OP_SUCCESS 守卫生效；
+    - 自复制 covenant：违规时在 covenant 检查处失败；伪造签名消息并重新算 challenge 时，在 CHECKSIGVERIFY 处以 SchnorrSig 失败；
+    - F→X1→X2→X3 的父交易反射：父交易不对时在 txid 比较处失败。
+  - 大小：
+    - `SighashAllGadget::build(2,2)` 190B，`build(8,8)` 630B；
+    - `TxBuildGadget::build(2,2)` 110B；
+    - `SchnorrTrickGadget::verify()` 204B。
+  - 开销：一次 2 进 2 出的自复制花费约 53 万 varops，主要是一次 CHECKSIG 的 50 万，大约相当于 50 WU 的预算。
 
 ### P4 vault
 

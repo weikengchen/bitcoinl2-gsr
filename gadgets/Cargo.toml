@@ -1,0 +1,17 @@
+[package]
+name = "gsr-gadgets"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin Script gadgets for covenants in tapscript leaf version 0xc2 (BIP 440/441)"
+
+[dependencies]
+bitcoin = { version = "0.32.0", features = ["rand"] }
+bitcoin-script = { git = "https://github.com/Bitcoin-Wildlife-Sanctuary/rust-bitcoin-script", tag = "1.0.0" }
+bitcoin-scriptexec = { path = "../scriptexec" }
+sha2 = "0.10.8"
+anyhow = "1.0.86"
+
+[dev-dependencies]
+bitcoin-simulator = { path = "../simulator" }
+rand = "0.8.5"
+rand_chacha = "0.3.1"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["scriptexec", "simulator"]
+members = ["scriptexec", "simulator", "gadgets"]
 resolver = "2"
 
 [profile.dev]
