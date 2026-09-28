@@ -5,5 +5,6 @@
 
 pub mod leaf;
 pub mod program_a;
+pub mod program_b;
 pub mod state;
 pub mod tx;

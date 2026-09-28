@@ -13,7 +13,7 @@ Great Script Restoration (BIP 440 varops budget, BIP 441 tapleaf 0xc2).
 | `scriptexec/` | Bitcoin Script executor with tapscript v2 (0xc2) support |
 | `simulator/` | Local ledger simulator (Rust + SQLite) that validates 0xc2 spends |
 | `gadgets/` | Covenant gadgets for 0xc2: SIGHASH_ALL introspection, Schnorr trick, txid reflection |
-| `vault/` | The vault (a UTXO line per the draft spec) and program a (deposits: merge and fold) |
+| `vault/` | The vault (a UTXO line per the draft spec), program a (deposits: merge and fold) and program b (withdrawals: split tree) |
 
 ## Provenance
 

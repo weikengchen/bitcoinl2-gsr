@@ -164,9 +164,32 @@
   - L1 链尖的记录（design §6，方案 A 第 4 条）还没有实现。
 - 覆盖 `verification-cases.md` 中剩下的 V 组用例。
 
-### P5b program b
+### P5b program b —— 完成（2026-09-28）
 
-- Merkle-sum 拆分树。
+- **设计**：见 design §7 第 2 条"实现"。
+  - 节点的承诺 R 就是拆分交易的 sha_outputs；
+  - 两个 leaf：root、internal；
+  - 内部节点采用 43 字节的规范布局。
+- **代码**（`vault/src/program_b.rs`）：
+  - `ProgramB`：`split_tx` 负责调整 nLockTime nonce；`witness_from` 给测试构造"最强攻击者"的 hint。
+  - `SplitTree`：按扇出分层构造树；可以从公开的清单重建；`withdrawal()` 生成完成交易所需的 (W, R, 清单)。
+- vault 的 `b_spk` 换成真实的 program b 地址。测试环境里的 World 同步修改。
+- **测试 `vault/tests/withdraw.rs`**：5 项全部通过。
+  - 端到端：存款、锁定、完成，再逐层拆分到 20 个收款人（扇出 4，三层）；另测一层的树（根节点直接付款）。每笔拆分交易的手续费都恰好是设定值。
+  - DA：从完成交易的 witness 中按哈希找回清单，重建出的根与完成交易承诺的 R 一致。
+  - 拆分的规则。反例的 hint 都和脚本的视角一致，也就是最强的攻击者，因此只能在签名检查处以 SchnorrSig 失败：
+    - 输出少付 1 sat；
+    - 输出改付给别人；
+    - 多加一个输入；
+    - 用另一个节点的输出去花这个 b。
+  - 其他反例：
+    - 根 b 用 internal leaf 花（父交易有两个输入）；
+    - 子节点的 pieces 错位（前段长度不对）。
+  - 大小：256 笔提款、扇出 16，平均每笔 74 vB。
+- **全部测试**：workspace 共 53 项，全部通过。
+- **暂未做**：
+  - 手续费目前是每笔拆分交易一个固定值，应改为按参考费率乘以交易大小；
+  - P2A anchor 输出。
 
 ### P6 在真实实现上对照验证（已取消，2026-09-28）
 

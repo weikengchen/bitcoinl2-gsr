@@ -12,6 +12,7 @@ use bitcoin_simulator::database::Database;
 use bitcoin_simulator::spending_requirements::P2TRChecker;
 use bitcoinl2_vault::leaf::{Kind, VaultConfig};
 use bitcoinl2_vault::program_a::ProgramA;
+use bitcoinl2_vault::program_b::ProgramB;
 use bitcoinl2_vault::state::{AppState, Mode, Params, State};
 use bitcoinl2_vault::tx::{input, op_return, Plan, Vault};
 
@@ -44,13 +45,13 @@ impl Wallet {
 
 /// A funded world. `f` has 8 wallet outputs (within the parser bounds, so it can be
 /// the grandparent of a first transition); `fees` pays the fee inputs.
-/// `operator` signs completions (the proof placeholder); `b` stands in for program b.
+/// `operator` signs completions (the proof placeholder); `b` is program b.
 pub struct World {
     pub db: Database,
     pub vault: Vault,
     pub wallet: Wallet,
     pub operator: Keypair,
-    pub b: Wallet,
+    pub b: ProgramB,
     pub f: Transaction,
     pub fees: Transaction,
     next_f: u32,
@@ -72,8 +73,8 @@ impl World {
         db.insert_transaction_unconditionally(&f).unwrap();
         db.insert_transaction_unconditionally(&fees).unwrap();
         let operator = Keypair::from_seckey_slice(&Secp256k1::new(), &[6; 32]).unwrap();
-        let b = Wallet::new(7);
-        let config = VaultConfig { operator: operator.x_only_public_key().0, b_spk: b.spk() };
+        let b = ProgramB::new().unwrap();
+        let config = VaultConfig { operator: operator.x_only_public_key().0, b_spk: b.script_pubkey() };
         let vault = Vault::new(config).unwrap();
         Self { db, vault, wallet, operator, b, f, fees, next_f: 0, next_fee: 0 }
     }

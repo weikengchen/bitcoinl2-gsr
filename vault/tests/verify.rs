@@ -76,7 +76,7 @@ fn lock_then_complete() {
     let x = line.accept(&w, &p);
     eprintln!("completion weighs {} WU ({} vB)", x.weight().to_wu(), x.vsize());
     assert_eq!(line.balance(), before - 5_000);
-    assert_eq!(x.output[2], TxOut { value: Amount::from_sat(5_000), script_pubkey: w.b.spk() });
+    assert_eq!(x.output[2], TxOut { value: Amount::from_sat(5_000), script_pubkey: w.b.script_pubkey() });
     assert_eq!(x.output[4], TxOut { value: Amount::from_sat(BOND), script_pubkey: refund(&w) });
     assert_eq!(line.app.mode, Mode::Normal);
     assert_eq!(line.app.params, new_params());
@@ -195,7 +195,7 @@ fn complete_rules() {
     check(&w, &p, "EqualVerify");
     // ... to the recorded refund address
     let p = line.plan(&mut w, vec![]);
-    let p = w.vault.complete(p, &withdrawal(), w.b.spk(), new_params());
+    let p = w.vault.complete(p, &withdrawal(), w.b.script_pubkey(), new_params());
     check(&w, &p, "EqualVerify");
 }
 
