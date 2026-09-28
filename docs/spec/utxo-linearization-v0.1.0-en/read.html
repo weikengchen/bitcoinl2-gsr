@@ -1,0 +1,413 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>UTXO Linearization · Research Draft v0.1.0</title><style>
+:root {color-scheme:light;--ink:#20333d;--muted:#5b6d78;--line:#d8e0e5;--accent:#285975;}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:28px}
+body{margin:0;background:#eef2f5;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;font-size:16px;line-height:1.75}
+.shell{max-width:1140px;margin:34px auto 70px;padding:0 28px}
+.utility{font-size:13px;color:var(--muted);margin:0 0 16px}
+main{background:#fff;border:1px solid var(--line);padding:52px 62px 64px}
+h1{font-size:32px;line-height:1.45;font-weight:650;letter-spacing:-.5px;margin:0 0 28px}
+h2{font-size:24px;line-height:1.5;margin:54px 0 22px;padding-top:16px;border-top:1px solid var(--line);font-weight:650}
+h3{font-size:19px;margin:28px 0 12px;line-height:1.5}p{margin:14px 0}li{margin:8px 0}
+a{color:var(--accent);text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
+code{font-family:Menlo,Consolas,'Liberation Mono',monospace;font-size:.86em;overflow-wrap:anywhere;background:#f1f4f6;padding:2px 5px;border-radius:3px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7f9;border-left:3px solid #a5bac7;padding:18px 20px;line-height:1.65;font-size:14px;tab-size:4}
+pre code{font-size:1em;background:transparent;padding:0;border-radius:0}
+table{width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;line-height:1.7;table-layout:auto}
+th,td{padding:10px 12px;border:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
+th{background:#edf3f6;text-align:left;font-weight:650}tr:nth-child(even) td{background:#fafcfd}
+img{width:100%;height:auto;display:block;margin:24px 0 14px;border:1px solid #e5ebef}
+strong{font-weight:650}blockquote{border-left:3px solid #abc0cc;margin:20px 0;padding-left:18px;color:var(--muted)}
+.endnote{font-size:12px;color:var(--muted);margin-top:24px}
+@media(max-width:750px){.shell{padding:0 10px;margin:12px auto}main{padding:28px 18px}h1{font-size:26px}h2{font-size:22px}table{font-size:12px}th,td{padding:7px}pre{font-size:12px;padding:13px}body{font-size:15px}}
+@media print{@page{size:A4;margin:18mm 17mm}body{background:white;font-size:10.5pt;line-height:1.65}.shell{max-width:none;margin:0;padding:0}main{border:0;padding:0}.utility,.endnote{display:none}h1{font-size:22pt}h2{font-size:16pt;margin-top:24pt;break-after:avoid}h3{font-size:12pt;break-after:avoid}pre{font-size:8pt}table{font-size:8.5pt}tr,img{break-inside:avoid}img{max-height:170mm;object-fit:contain}a{color:inherit;text-decoration:none}p{orphans:3;widows:3}}
+</style></head><body><div class="shell"><div class="utility">UTXO Linearization · Offline edition &nbsp; | &nbsp; <a href="README.md">Package guide</a> &nbsp; · &nbsp; <a href="bip-utxo-linearization.md">Markdown source</a></div><main><h1>UTXO Linearization: Chain Identity and State Continuity with Caboose</h1>
+<pre><code class="language-text">BIP: ?
+Layer: Applications
+Title: UTXO Linearization with Caboose State
+Authors: To be supplied by the proposer
+Status: Draft
+Type: Specification
+Assigned: ?
+License: To be specified by the rights holder
+Version: 0.1.0
+Requires: 141, 340, 341, 342, 347
+</code></pre>
+<p><strong>Research draft · 2026-09-08</strong></p>
+<p>This document follows a BIP-style structure. It has not been assigned a BIP number or submitted as a formal BIP. The state encoding, validation algorithm, and implementation profile are proposed by this draft; a validated reference implementation of the complete protocol is not yet available. The proposer must complete the author and license fields before using this document for a formal submission.</p>
+<p>Contents: <a href="#s1">Abstract</a> · <a href="#s2">Motivation</a> · <a href="#s3">Scope</a> · <a href="#s4">Terminology</a> · <a href="#s5">Execution assumptions</a> · <a href="#s6">State encoding</a> · <a href="#s7">Caboose</a> · <a href="#s8">Transaction structure</a> · <a href="#s9">Introspection</a> · <a href="#s10">Validation algorithm</a> · <a href="#s11">Identity and uniqueness</a> · <a href="#s12">Contract verification</a> · <a href="#s13">Vault accounting</a> · <a href="#s14">Resources and data</a> · <a href="#s15">Rationale</a> · <a href="#s16">Compatibility</a> · <a href="#s17">Implementation status</a> · <a href="#s18">Open research</a> · <a href="#s19">Copyright</a> · <a href="#s20">References</a>.</p>
+<p><a id="s1"></a></p>
+<h2>1. Abstract</h2>
+<p>This document defines a UTXO linearization protocol in which an application chain holds its vault funds in a unique main-program output and commits to its current state through a caboose output in the same transaction. Every state transition MUST spend the main-program output at input index 0 and create its unique successor at output index 0. All other inputs and outputs have explicitly constrained auxiliary roles and MUST NOT contain a second main-program instance.</p>
+<p>The chain identifier is the txid of its genesis transaction. The genesis state commits to the initial application state but does not contain this identifier. The first transition obtains the genesis txid from the actual spent outpoint and writes it into the new state. Every subsequent transition preserves the identifier byte for byte.</p>
+<p>Identity authentication combines CAT/Schnorr transaction introspection, parent-transaction txid reflection, and authentication of the predecessor output spent by the parent transaction. Provided that every main-program spending path enforces the same validation rules, two-generation backtracing and inductive enforcement can preserve identity without supplying the complete history for each spend.</p>
+<p><a id="s2"></a></p>
+<h2>2. Motivation</h2>
+<p>Identical scripts do not identify the same program instance. Anyone can create a new output paying to an existing scriptPubKey, or copy another instance&#39;s claimed state and identifier. An observer who checks only the script or state fields cannot determine whether an output belongs to the intended chain.</p>
+<p>This protocol names an instance by a specific creation event and binds all subsequent state transitions to that event. It provides three related properties: a stable instance identity, a unique valid main-program successor, and a transaction-level binding between the state commitment and the vault output.</p>
+<p>The design targets a single-chain state machine: one main-program instance represents an application chain&#39;s current state and vault. It does not define composition that advances several independent main programs in one transaction.</p>
+<p><a id="s3"></a></p>
+<h2>3. Scope and Normative Language</h2>
+<p>The terms MUST, MUST NOT, SHOULD, and MAY indicate requirement strength. Sections 4–10 and 12–14 define this draft&#39;s protocol requirements except where expressly identified as explanatory. Section 11 presents conditional arguments. Sections 15–20 and the accompanying implementation notes are informative.</p>
+<p>This document specifies identity, the state envelope, transaction roles, and validation conditions. It does not define an application&#39;s consensus algorithm, block format, withdrawal authorization, proof system, or business-state transition function. An implementation MUST supply these extension points through a fixed application configuration. It MUST NOT replace application validation with an arbitrary Boolean supplied in the witness.</p>
+<p>The stated properties apply within a valid view of the target chain. They do not provide naming across blockchains, cross-chain finality, automatic data availability, or a guarantee of continued execution.</p>
+<p><a id="s4"></a></p>
+<h2>4. Terminology, Notation, and Application Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Definition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>H(x)</code></td>
+<td>SHA256(x), producing 32 bytes</td>
+</tr>
+<tr>
+<td><code>H256(x)</code></td>
+<td>SHA256(SHA256(x)), producing 32 bytes</td>
+</tr>
+<tr>
+<td><code>T_n</code></td>
+<td>The transaction creating the nth main-program output; T0 is genesis</td>
+</tr>
+<tr>
+<td><code>U_n</code></td>
+<td>The outpoint <code>(txid(T_n), 0)</code></td>
+</tr>
+<tr>
+<td><code>P</code></td>
+<td>This instance&#39;s complete P2TR scriptPubKey, unchanged throughout its lineage</td>
+</tr>
+<tr>
+<td><code>M</code></td>
+<td>A fixed, verifiable set of main-program scripts containing at least P</td>
+</tr>
+<tr>
+<td><code>B_n</code></td>
+<td><code>T_n.output[0].value</code>: the actual vault amount in satoshis</td>
+</tr>
+<tr>
+<td><code>S_n</code></td>
+<td>The state envelope encoded under Section 6</td>
+</tr>
+<tr>
+<td><code>A_n</code></td>
+<td>The application-state data, or the state described by an application proof</td>
+</tr>
+<tr>
+<td><code>app_root_n</code></td>
+<td>A 32-byte commitment to the application state</td>
+</tr>
+<tr>
+<td><code>C_n</code></td>
+<td>The last output of T_n: its designated caboose</td>
+</tr>
+<tr>
+<td><code>X, T, Q</code></td>
+<td>The current spending transaction, the parent that created its spent main-program output, and the grandparent referenced by T&#39;s input 0</td>
+</tr>
+<tr>
+<td><code>EncodeTx(T)</code></td>
+<td>Bitcoin transaction serialization without witness, including scriptSig and nLockTime</td>
+</tr>
+<tr>
+<td><code>Spent(X,i)</code></td>
+<td>The output actually spent by input i of X, including its amount and scriptPubKey</td>
+</tr>
+</tbody></table>
+<p>All transaction fields use Bitcoin consensus serialization. Fixed-width transaction integers and the randomizer r use little-endian encoding; CompactSize MUST use its shortest encoding. Schnorr public-key coordinates, challenge integers, and signature scalars instead follow BIP 340&#39;s big-endian representation. The txid used in an outpoint is the raw 32-byte result of <code>H256(EncodeTx(T))</code>. Conventional block-explorer txid strings display these bytes in reverse order. Implementations MUST NOT mix display order and outpoint order in state fields.</p>
+<p>A deployment MUST fix an application configuration <code>D</code> specifying at least: the target-chain context; the complete Taproot construction; main-program recognition rules; the initial-state predicate <code>Init</code>; the first-transition predicate <code>First</code>; the ordinary transition predicate <code>Step</code>; state-commitment or proof rules; auxiliary input and output roles; the caboose amount <code>c</code>; vault-accounting rules; and application resource limits. These rules MUST be enforced by the main program or by validation logic it uses that is bound to the actual transaction.</p>
+<p>The minimal configuration is <code>M = {P}</code>, which excludes all additional instances sharing this program script. An application that must exclude multiple kinds of main programs MUST define their script set or a verifiable recognition rule. The ability to infer the program semantics behind an arbitrary unknown P2TR output MUST NOT be assumed. External verifiers MUST know the expected P, application configuration, and chain context.</p>
+<p><a id="s5"></a></p>
+<h2>5. Execution Assumptions</h2>
+<p><strong>ENV-1</strong>: The target environment MUST execute opcode <code>0x7e</code> with the OP_CAT concatenation semantics described by BIP 347. Activation on the target chain MUST NOT be inferred solely from a BIP document&#39;s status. <a href="https://github.com/bitcoin/bips/blob/master/bip-0347.mediawiki">BIP 347</a></p>
+<p><strong>ENV-2</strong>: The main program uses Tapscript. Every available spending path MUST enforce the complete protocol validation. There MUST NOT be a script leaf that can rewrite identity, bypass authentication, or omit the successor. The Taproot internal public key MUST be constructed with no known discrete logarithm, preventing a known private key from bypassing the script through the key path. External verifiers MUST check the complete expected output construction, rather than accept a seemingly correct leaf in isolation.</p>
+<p><strong>ENV-3</strong>: The introspection mechanism MUST bind the data used by the script to the signature message of the actual <code>OP_CHECKSIGVERIFY</code> execution. Merely hashing a witness-supplied preimage does not satisfy this condition.</p>
+<p><strong>ENV-4</strong>: The protocol arguments assume standard hash-binding and elliptic-curve assumptions, correct consensus execution, and an authenticated transaction and chain context. A caller-supplied byte string with no authenticated spending relationship is not a “valid transaction” for these arguments.</p>
+<p><a id="s6"></a></p>
+<h2>6. State Encoding</h2>
+<h3>6.1 Canonical Envelope</h3>
+<p>This draft defines the following byte format. Constants denote exact bytes, not Script number encodings.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th align="right">Bytes</th>
+<th>Value or meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>magic</code></td>
+<td align="right">7</td>
+<td>ASCII <code>UTXOLIN</code>: <code>55 54 58 4f 4c 49 4e</code></td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td align="right">1</td>
+<td><code>01</code></td>
+</tr>
+<tr>
+<td><code>phase</code></td>
+<td align="right">1</td>
+<td><code>00</code> for GENESIS; <code>01</code> for ACTIVE</td>
+</tr>
+<tr>
+<td><code>genesis_id</code></td>
+<td align="right">0 or 32</td>
+<td>Absent in GENESIS; mandatory in ACTIVE</td>
+</tr>
+<tr>
+<td><code>app_root</code></td>
+<td align="right">32</td>
+<td>Application-defined state commitment</td>
+</tr>
+</tbody></table>
+<pre><code class="language-text">EncodeGenesis(app_root) = magic || 0x01 || 0x00 || app_root
+EncodeActive(id, app_root) = magic || 0x01 || 0x01 || id || app_root
+state_hash = H(EncodeState(S))
+</code></pre>
+<p>The GENESIS encoding is exactly 41 bytes. The ACTIVE encoding is exactly 73 bytes.</p>
+<p><strong>STATE-1</strong>: Parsers MUST reject an incorrect magic value, an unknown version or phase, an incorrect total length, or any trailing bytes. GENESIS MUST NOT contain an id field.</p>
+<p><strong>STATE-2</strong>: The application MUST verify the relationship between <code>app_root</code> and the required application state or proof. Hashing the envelope establishes byte consistency; it does not replace application validation.</p>
+<p><strong>STATE-3</strong>: An all-zero id MUST NOT represent “no identity.” The phase and exact length determine whether an identity is present. Any 32-byte id in an ACTIVE envelope remains subject to the origin authentication in Section 10.</p>
+<p>This encoding is introduced by this draft. It is not the existing wire format of the reference repository.</p>
+<h3>6.2 Identity Invariant</h3>
+<pre><code class="language-text">S_0.phase = GENESIS
+For every n &gt;= 1:
+    S_n.phase = ACTIVE
+    S_n.genesis_id = txid(T_0)
+</code></pre>
+<p>The genesis state still contains the initial application-state commitment. Only the writing of genesis_id is deferred.</p>
+<p><a id="s7"></a></p>
+<h2>7. Caboose State Commitment</h2>
+<p>For state S and an unsigned 32-bit randomizer r:</p>
+<pre><code class="language-text">h = H(EncodeState(S))
+w = 0x6a || 0x24 || h || LE32(r)
+caboose_spk = 0x00 || 0x20 || H(w)
+</code></pre>
+<p>The 38-byte witnessScript <code>w</code> means <code>OP_RETURN PUSHBYTES_36 &lt;h || r&gt;</code>. The 34-byte caboose_spk is the P2WSH script <code>OP_0 PUSHBYTES_32 H(w)</code>. <a href="https://github.com/Bitcoin-Wildlife-Sanctuary/covenants-gadgets/blob/93e057f2abdac14760b6a8ff82ee4a613a263153/src/lib.rs#L265-L289">Reference construction</a></p>
+<p><strong>CAB-1</strong>: Every protocol transaction MUST place its unique designated caboose at the last output. Its amount MUST equal c, fixed by the application configuration, and its scriptPubKey MUST equal the result above.</p>
+<p><strong>CAB-2</strong>: The main program MUST NOT use the caboose as a vault-funds output. The old caboose is not a transition input. Its witnessScript begins with OP_RETURN and is unspendable under the hash-security assumptions. <a href="https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki">P2WSH rules</a></p>
+<p><strong>CAB-3</strong>: The randomizer r changes the transaction commitment to support Schnorr grinding; it is not application state. Changing r still requires the transaction commitments to be satisfied. Different values of r MAY correspond to the same logical state.</p>
+<p><strong>CAB-4</strong>: No other output may use exactly the same scriptPubKey as this transaction&#39;s designated caboose. Other P2WSH outputs that might hide similar semantics are governed only by application-role rules and do not participate in main-program state authentication.</p>
+<p><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNDQwIiBoZWlnaHQ9IjY3MCIgdmlld0JveD0iMCAwIDE0NDAgNjcwIiByb2xlPSJpbWciIGFyaWEtbGFiZWxsZWRieT0idGl0bGUgZGVzYyI+Cjx0aXRsZSBpZD0idGl0bGUiPkhvdyBjYWJvb3NlIGJpbmRzIHN0YXRlIHRvIHRoZSBtYWluIHByb2dyYW08L3RpdGxlPjxkZXNjIGlkPSJkZXNjIj5UaGUgc3RhdGUgZW52ZWxvcGUgaXMgaGFzaGVkIGludG8gYW4gT1BfUkVUVVJOIHdpdG5lc3NTY3JpcHQgYW5kIHRoZW4gaW50byBhIFAyV1NIIG91dHB1dC4gVGhpcyBvdXRwdXQgc2hhcmVzIGEgdHJhbnNhY3Rpb24gd2l0aCB0aGUgbWFpbiBwcm9ncmFtLiBUaGUgbmV4dCBzcGVuZCBhdXRoZW50aWNhdGVzIHRoYXQgdHJhbnNhY3Rpb24gdGhyb3VnaCBpdHMgdHhpZC48L2Rlc2M+CjxkZWZzPjxtYXJrZXIgaWQ9ImFycm93IiB2aWV3Qm94PSIwIDAgMTAgMTAiIHJlZlg9IjkiIHJlZlk9IjUiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIG9yaWVudD0iYXV0by1zdGFydC1yZXZlcnNlIj48cGF0aCBkPSJNIDAgMCBMIDEwIDUgTCAwIDEwIHoiIGZpbGw9IiM1MjY3NzciIC8+PC9tYXJrZXI+PC9kZWZzPgo8c3R5bGU+dGV4dHtmb250LWZhbWlseTpBcmlhbCxIZWx2ZXRpY2Esc2Fucy1zZXJpZjtmaWxsOiMyMDMzM2R9IC50aXRsZXtmb250LXNpemU6MzJweDtmb250LXdlaWdodDo2NTB9IC5zdWJ7Zm9udC1zaXplOjE5cHg7ZmlsbDojNTk3MTdlfSAubGFiZWx7Zm9udC1zaXplOjIycHg7Zm9udC13ZWlnaHQ6NjAwfSAuYm9keXtmb250LXNpemU6MjBweH0gLnNtYWxse2ZvbnQtc2l6ZToxN3B4O2ZpbGw6IzU5NzE3ZX0gLm1vbm97Zm9udC1mYW1pbHk6TWVubG8sQ29uc29sYXMsbW9ub3NwYWNlO2ZvbnQtc2l6ZToxOHB4fSAuZWRnZXtmaWxsOm5vbmU7c3Ryb2tlOiM1MjY3Nzc7c3Ryb2tlLXdpZHRoOjIuNTttYXJrZXItZW5kOnVybCgjYXJyb3cpfSA8L3N0eWxlPgo8cmVjdCB3aWR0aD0iMTQ0MCIgaGVpZ2h0PSI2NzAiIGZpbGw9IiNmOGZhZmIiIC8+Cjx0ZXh0IHg9IjY0IiB5PSI1NCIgY2xhc3M9InRpdGxlIj5Ib3cgY2Fib29zZSBiaW5kcyBzdGF0ZSB0byB0aGUgbWFpbiBwcm9ncmFtPC90ZXh0Pgo8dGV4dCB4PSI2NCIgeT0iODgiIGNsYXNzPSJzdWIiPkFycm93cyBzaG93IGNvbW1pdG1lbnQgcmVsYXRpb25zaGlwcy4gVGhlIG5leHQgZXhlY3V0aW9uIHN1cHBsaWVzIHRoZSBkYXRhIGFuZCByZWNvbXB1dGVzIHRoZW0uPC90ZXh0Pgo8cmVjdCB4PSI2NCIgeT0iMTQzIiB3aWR0aD0iMzY4IiBoZWlnaHQ9IjEzNCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiNkMmRkZTIiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8cmVjdCB4PSI1MjgiIHk9IjE0MyIgd2lkdGg9IjMyOCIgaGVpZ2h0PSIxMzQiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjZDJkZGUyIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHJlY3QgeD0iOTUyIiB5PSIxNDMiIHdpZHRoPSI0MjQiIGhlaWdodD0iMTM0IiByeD0iMTIiIGZpbGw9IiNmZmZmZmYiIHN0cm9rZT0iI2QyZGRlMiIgc3Ryb2tlLXdpZHRoPSIxLjUiIC8+Cjx0ZXh0IHg9Ijg4IiB5PSIxODEiIGNsYXNzPSJsYWJlbCI+U3RhdGUgZW52ZWxvcGUgUzwvdGV4dD4KPHRleHQgeD0iODgiIHk9IjIxNyIgY2xhc3M9Im1vbm8iPnBoYXNlICsgW2dlbmVzaXNfaWRdICsgYXBwX3Jvb3Q8L3RleHQ+Cjx0ZXh0IHg9Ijg4IiB5PSIyNTAiIGNsYXNzPSJzbWFsbCI+R0VORVNJUzogNDEgYnl0ZXMgLyBBQ1RJVkU6IDczIGJ5dGVzPC90ZXh0Pgo8dGV4dCB4PSI1NTIiIHk9IjE4MSIgY2xhc3M9ImxhYmVsIj5TdGF0ZSBoYXNoIGg8L3RleHQ+Cjx0ZXh0IHg9IjU1MiIgeT0iMjIwIiBjbGFzcz0ibW9ubyI+aCA9IFNIQTI1NihFbmNvZGUoUykpPC90ZXh0Pgo8dGV4dCB4PSI1NTIiIHk9IjI1MiIgY2xhc3M9InNtYWxsIj4zMiBieXRlczwvdGV4dD4KPHRleHQgeD0iOTc2IiB5PSIxODEiIGNsYXNzPSJsYWJlbCI+d2l0bmVzc1NjcmlwdCB3PC90ZXh0Pgo8dGV4dCB4PSI5NzYiIHk9IjIxOSIgY2xhc3M9Im1vbm8iPjZhIDI0IHx8IGggfHwgTEUzMihyKTwvdGV4dD4KPHRleHQgeD0iOTc2IiB5PSIyNTIiIGNsYXNzPSJzbWFsbCI+T1BfUkVUVVJOICsgMzYtYnl0ZSBwYXlsb2FkPC90ZXh0Pgo8cG9seWxpbmUgcG9pbnRzPSI0MzIsMjEwIDUyNywyMTAiIGNsYXNzPSJlZGdlIiAvPgo8cG9seWxpbmUgcG9pbnRzPSI4NTYsMjEwIDk1MSwyMTAiIGNsYXNzPSJlZGdlIiAvPgo8cmVjdCB4PSI5NTIiIHk9IjM2NyIgd2lkdGg9IjQyNCIgaGVpZ2h0PSIxNTQiIHJ4PSIxMiIgZmlsbD0iI2VlZjJmYiIgc3Ryb2tlPSIjYWZiZmRjIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHRleHQgeD0iOTc2IiB5PSI0MDciIGNsYXNzPSJsYWJlbCI+Q2Fib29zZSBvdXRwdXQ8L3RleHQ+Cjx0ZXh0IHg9Ijk3NiIgeT0iNDQ1IiBjbGFzcz0ibW9ubyI+MDAgMjAgfHwgU0hBMjU2KHcpPC90ZXh0Pgo8dGV4dCB4PSI5NzYiIHk9IjQ4MCIgY2xhc3M9ImJvZHkiPlAyV1NIIMK3IExhc3Qgb3V0cHV0IMK3IEFtb3VudCBjPC90ZXh0Pgo8cG9seWxpbmUgcG9pbnRzPSIxMTY0LDI3NyAxMTY0LDM2NiIgY2xhc3M9ImVkZ2UiIC8+CjxyZWN0IHg9IjUyOCIgeT0iMzY3IiB3aWR0aD0iMzI4IiBoZWlnaHQ9IjE1NCIgcng9IjEyIiBmaWxsPSIjZWRmNmYzIiBzdHJva2U9IiM5ZWJmYWYiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8dGV4dCB4PSI1NTIiIHk9IjQwNyIgY2xhc3M9ImxhYmVsIj5DcmVhdGluZyB0cmFuc2FjdGlvbiBUPC90ZXh0Pgo8dGV4dCB4PSI1NTIiIHk9IjQ0NSIgY2xhc3M9Im1vbm8iPm91dHB1dFswXSA9IG1haW4gcHJvZ3JhbSBQPC90ZXh0Pgo8dGV4dCB4PSI1NTIiIHk9IjQ4MCIgY2xhc3M9ImJvZHkiPkxhc3Qgb3V0cHV0ID0gY2Fib29zZTwvdGV4dD4KPHBvbHlsaW5lIHBvaW50cz0iOTUyLDQ0NCA4NTcsNDQ0IiBjbGFzcz0iZWRnZSIgLz4KPHJlY3QgeD0iNjQiIHk9IjM2NyIgd2lkdGg9IjM2OCIgaGVpZ2h0PSIxNTQiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjZDJkZGUyIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHRleHQgeD0iODgiIHk9IjQwNyIgY2xhc3M9ImxhYmVsIj5OZXh0IHNwZW5kIG9mIFU8L3RleHQ+Cjx0ZXh0IHg9Ijg4IiB5PSI0NDUiIGNsYXNzPSJtb25vIj5VID0gKHR4aWQoVCksIDApPC90ZXh0Pgo8dGV4dCB4PSI4OCIgeT0iNDgwIiBjbGFzcz0iYm9keSI+QWN0dWFsIG91dHBvaW50IGF1dGhlbnRpY2F0ZXMgVDwvdGV4dD4KPHBvbHlsaW5lIHBvaW50cz0iNTI4LDQ0NCA0MzMsNDQ0IiBjbGFzcz0iZWRnZSIgLz4KPHRleHQgeD0iNjQiIHk9IjU4OSIgY2xhc3M9InN1YiI+QXV0aGVudGljYXRlIG9sZCBzdGF0ZTogc3VwcGx5IFMsIHIsIGFuZCBUIHdpdGhvdXQgd2l0bmVzczsgcmVjb21wdXRlIGFuZCBtYXRjaCB0aGUgYWN0dWFsIHNwZW50IG91dHBvaW50LjwvdGV4dD4KPHRleHQgeD0iNjQiIHk9IjYyNCIgY2xhc3M9InN1YiI+Q2Fib29zZSBzdG9yZXMgb25seSBhIGNvbW1pdG1lbnQ7IHRoZSBhcHBsaWNhdGlvbiBtdXN0IGFycmFuZ2Ugc3RhdGUgZGF0YSBhdmFpbGFiaWxpdHkuPC90ZXh0Pgo8L3N2Zz4=" alt="Caboose state commitment and authentication path"></p>
+<p>Figure 1. The state data passes through two hash commitments into the caboose. The creating transaction&#39;s txid then binds it to the main-program output. The state data does not appear directly in the caboose scriptPubKey.</p>
+<p><a id="s8"></a></p>
+<h2>8. Transaction Structure and Role Partitioning</h2>
+<h3>8.1 Transaction Format</h3>
+<p>Protocol transactions T_n in this draft&#39;s baseline use <code>nVersion = 2</code> and <code>nLockTime = 0</code>. Every input has <code>nSequence = 0xfffffffd</code> and an empty scriptSig. The outputs actually spent by the inputs MUST be application-approved native P2WPKH, P2WSH, or P2TR outputs, so that the empty-scriptSig model agrees with the actual consensus rules.</p>
+<p><strong>TX-1</strong>: There MUST be at least two outputs. Output 0 is the main program; the last output is the caboose. Every remaining output MUST satisfy the auxiliary-output rules. The baseline supports only the native SegWit output types listed above.</p>
+<p><strong>TX-2</strong>: Every protocol transaction and every ancestor used for txid reflection MUST satisfy the resource baseline in Section 14. The current transaction&#39;s format and size MUST be constrained when creating the successor; discovering only at the successor&#39;s spend that its parent cannot be reflected is too late.</p>
+<h3>8.2 Genesis Transaction</h3>
+<p><strong>GEN-1</strong>: T0 MUST have exactly one input. The scriptPubKey of the output it actually spends MUST be outside M and MUST satisfy the application&#39;s permitted-funding-source predicate.</p>
+<p><strong>GEN-2</strong>: The set of output indices in T0 whose scripts belong to M MUST be exactly <code>{0}</code>, and output 0 MUST use P. Its caboose MUST commit to a GENESIS state that passes Init.</p>
+<p>Creating the genesis output does not execute its new script. GEN-1 and GEN-2 are enforced by script when the main program is first spent. An observer accepting genesis before that spend MUST verify these conditions independently.</p>
+<h3>8.3 Transition Transaction</h3>
+<p>Define the complete index sets <code>I(X) = {0, …, len(X.input)-1}</code> and <code>O(X) = {0, …, len(X.output)-1}</code>:</p>
+<pre><code class="language-text">MainInputs(X)  = { i ∈ I(X) : Spent(X,i).scriptPubKey ∈ M }
+MainOutputs(X) = { j ∈ O(X) : X.output[j].scriptPubKey ∈ M }
+</code></pre>
+<p><strong>LIN-1</strong>: Every transition transaction X MUST satisfy <code>MainInputs(X) = {0}</code> and <code>MainOutputs(X) = {0}</code>. Both corresponding scriptPubKeys MUST equal P.</p>
+<p><strong>LIN-2</strong>: The input executing this validator MUST have index 0, and <code>X.input[0].prevout.vout</code> MUST equal 0. The current input index and the spent output index MUST be checked separately.</p>
+<p><strong>LIN-3</strong>: The baseline does not allow termination, branching, merging, or replacing P with another main-program script. Every valid spend MUST produce one successor. The system does not guarantee that anyone will spend that successor in the future.</p>
+<h3>8.4 Exhaustive, Disjoint Roles</h3>
+<p><strong>ROLE-1</strong>: Input indices MUST be partitioned exhaustively into the main-program role and application-defined auxiliary input roles. Output indices MUST be partitioned exhaustively into main-program, caboose, and application-defined auxiliary output roles. Within each direction, the union of all role sets MUST equal the full index set, and every pair of distinct role sets MUST have an empty intersection.</p>
+<p><strong>ROLE-2</strong>: Role assignment MUST use authenticated fields and application rules. Implementations MUST NOT check only a caller-selected subset of inputs or outputs, and MUST NOT accept unrecognized entries by default.</p>
+<p><strong>ROLE-3</strong>: An auxiliary contract MAY participate in an application-approved interaction role, but MUST NOT be a second main program in M. Excluding simultaneous main-program transitions does not exclude all auxiliary script inputs.</p>
+<p><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNDQwIiBoZWlnaHQ9IjY4MCIgdmlld0JveD0iMCAwIDE0NDAgNjgwIiByb2xlPSJpbWciIGFyaWEtbGFiZWxsZWRieT0idGl0bGUgZGVzYyI+Cjx0aXRsZSBpZD0idGl0bGUiPk1haW4tcHJvZ3JhbSBsaW5lYWdlIGFuZCB0aGUgdHJhaWxpbmcgY2Fib29zZTwvdGl0bGU+PGRlc2MgaWQ9ImRlc2MiPlQwIGhhcyBubyBzdGF0ZSBpZC4gVDEgd3JpdGVzIHRoZSBnZW5lc2lzIHR4aWQuIFQyIHByZXNlcnZlcyBpdC4gT25seSB0aGUgbWFpbi1wcm9ncmFtIG91dHB1dHMgYXJlIGNvbnN1bWVkOyBvbGQgY2Fib29zZXMgYXJlIG5vdC48L2Rlc2M+CjxkZWZzPjxtYXJrZXIgaWQ9ImFycm93IiB2aWV3Qm94PSIwIDAgMTAgMTAiIHJlZlg9IjkiIHJlZlk9IjUiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIG9yaWVudD0iYXV0by1zdGFydC1yZXZlcnNlIj48cGF0aCBkPSJNIDAgMCBMIDEwIDUgTCAwIDEwIHoiIGZpbGw9IiM1MjY3NzciIC8+PC9tYXJrZXI+PC9kZWZzPgo8c3R5bGU+dGV4dHtmb250LWZhbWlseTpBcmlhbCxIZWx2ZXRpY2Esc2Fucy1zZXJpZjtmaWxsOiMyMDMzM2R9IC50aXRsZXtmb250LXNpemU6MzJweDtmb250LXdlaWdodDo2NTB9IC5zdWJ7Zm9udC1zaXplOjE5cHg7ZmlsbDojNTk3MTdlfSAubGFiZWx7Zm9udC1zaXplOjIycHg7Zm9udC13ZWlnaHQ6NjAwfSAuYm9keXtmb250LXNpemU6MjBweH0gLnNtYWxse2ZvbnQtc2l6ZToxN3B4O2ZpbGw6IzU5NzE3ZX0gLm1vbm97Zm9udC1mYW1pbHk6TWVubG8sQ29uc29sYXMsbW9ub3NwYWNlO2ZvbnQtc2l6ZToxOHB4fSAuZWRnZXtmaWxsOm5vbmU7c3Ryb2tlOiM1MjY3Nzc7c3Ryb2tlLXdpZHRoOjIuNTttYXJrZXItZW5kOnVybCgjYXJyb3cpfSA8L3N0eWxlPgo8cmVjdCB3aWR0aD0iMTQ0MCIgaGVpZ2h0PSI2ODAiIGZpbGw9IiNmOGZhZmIiIC8+Cjx0ZXh0IHg9IjY0IiB5PSI1NCIgY2xhc3M9InRpdGxlIj5NYWluLXByb2dyYW0gbGluZWFnZSBhbmQgdGhlIHRyYWlsaW5nIGNhYm9vc2U8L3RleHQ+Cjx0ZXh0IHg9IjY0IiB5PSI4OCIgY2xhc3M9InN1YiI+RWFjaCB0cmFuc2FjdGlvbiBoYXMgb25lIG1haW4tcHJvZ3JhbSBvdXRwdXQgaG9sZGluZyB0aGUgdmF1bHQgYW5kIGEgZGVzaWduYXRlZCBjYWJvb3NlIGNvbW1pdHRpbmcgdG8gc3RhdGUuPC90ZXh0Pgo8cmVjdCB4PSI2NCIgeT0iMTIyIiB3aWR0aD0iMzY4IiBoZWlnaHQ9IjQ3NCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiNkMmRkZTIiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8cmVjdCB4PSI2NCIgeT0iMTIyIiB3aWR0aD0iMzY4IiBoZWlnaHQ9IjYyIiByeD0iMTIiIGZpbGw9IiNlYWYxZjQiIHN0cm9rZT0iI2QyZGRlMiIgc3Ryb2tlLXdpZHRoPSIxLjUiIC8+Cjx0ZXh0IHg9Ijg4IiB5PSIxNjEiIGNsYXNzPSJsYWJlbCI+VDAgwrcgR2VuZXNpczwvdGV4dD4KPHRleHQgeD0iODgiIHk9IjIyMiIgY2xhc3M9ImxhYmVsIj5JbnB1dCAwPC90ZXh0Pgo8dGV4dCB4PSI4OCIgeT0iMjU2IiBjbGFzcz0iYm9keSI+QXBwcm92ZWQgb3JkaW5hcnkgZnVuZGluZzwvdGV4dD4KPHJlY3QgeD0iODQiIHk9IjI5NCIgd2lkdGg9IjMyOCIgaGVpZ2h0PSI5OCIgcng9IjEyIiBmaWxsPSIjZWRmNmYzIiBzdHJva2U9IiM5ZWJmYWYiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8dGV4dCB4PSIxMDIiIHk9IjMzMSIgY2xhc3M9ImxhYmVsIj5PdXRwdXQgMCDCtyBNYWluIHByb2dyYW0gUDwvdGV4dD4KPHRleHQgeD0iMTAyIiB5PSIzNjkiIGNsYXNzPSJtb25vIj52YXVsdCA9IEIwPC90ZXh0Pgo8dGV4dCB4PSI4OCIgeT0iNDMyIiBjbGFzcz0ic21hbGwiPk1pZGRsZSBvdXRwdXRzOiBjb25zdHJhaW5lZCByb2xlczwvdGV4dD4KPHJlY3QgeD0iODQiIHk9IjQ1OCIgd2lkdGg9IjMyOCIgaGVpZ2h0PSIxMTQiIHJ4PSIxMiIgZmlsbD0iI2VlZjJmYiIgc3Ryb2tlPSIjYWZiZmRjIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHRleHQgeD0iMTAyIiB5PSI0OTUiIGNsYXNzPSJsYWJlbCI+TGFzdCBvdXRwdXQgwrcgQ2Fib29zZTwvdGV4dD4KPHRleHQgeD0iMTAyIiB5PSI1MjkiIGNsYXNzPSJib2R5Ij5HRU5FU0lTIMK3IE5vIGlkIHlldDwvdGV4dD4KPHRleHQgeD0iMTAyIiB5PSI1NTMiIGNsYXNzPSJzbWFsbCI+UzAgaW5jbHVkZXMgdGhlIGFwcGxpY2F0aW9uIHJvb3Q8L3RleHQ+CjxyZWN0IHg9IjUzNiIgeT0iMTIyIiB3aWR0aD0iMzY4IiBoZWlnaHQ9IjQ3NCIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiNkMmRkZTIiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8cmVjdCB4PSI1MzYiIHk9IjEyMiIgd2lkdGg9IjM2OCIgaGVpZ2h0PSI2MiIgcng9IjEyIiBmaWxsPSIjZWFmMWY0IiBzdHJva2U9IiNkMmRkZTIiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8dGV4dCB4PSI1NjAiIHk9IjE2MSIgY2xhc3M9ImxhYmVsIj5UMSDCtyBGaXJzdCB0cmFuc2l0aW9uPC90ZXh0Pgo8dGV4dCB4PSI1NjAiIHk9IjIyMiIgY2xhc3M9ImxhYmVsIj5JbnB1dCAwPC90ZXh0Pgo8dGV4dCB4PSI1NjAiIHk9IjI1NiIgY2xhc3M9ImJvZHkiPlNwZW5kIFUwID0gKHR4aWQoVDApLCAwKTwvdGV4dD4KPHJlY3QgeD0iNTU2IiB5PSIyOTQiIHdpZHRoPSIzMjgiIGhlaWdodD0iOTgiIHJ4PSIxMiIgZmlsbD0iI2VkZjZmMyIgc3Ryb2tlPSIjOWViZmFmIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHRleHQgeD0iNTc0IiB5PSIzMzEiIGNsYXNzPSJsYWJlbCI+T3V0cHV0IDAgwrcgTWFpbiBwcm9ncmFtIFA8L3RleHQ+Cjx0ZXh0IHg9IjU3NCIgeT0iMzY5IiBjbGFzcz0ibW9ubyI+dmF1bHQgPSBCMTwvdGV4dD4KPHRleHQgeD0iNTYwIiB5PSI0MzIiIGNsYXNzPSJzbWFsbCI+TWlkZGxlIG91dHB1dHM6IGNvbnN0cmFpbmVkIHJvbGVzPC90ZXh0Pgo8cmVjdCB4PSI1NTYiIHk9IjQ1OCIgd2lkdGg9IjMyOCIgaGVpZ2h0PSIxMTQiIHJ4PSIxMiIgZmlsbD0iI2VlZjJmYiIgc3Ryb2tlPSIjYWZiZmRjIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHRleHQgeD0iNTc0IiB5PSI0OTUiIGNsYXNzPSJsYWJlbCI+TGFzdCBvdXRwdXQgwrcgQ2Fib29zZTwvdGV4dD4KPHRleHQgeD0iNTc0IiB5PSI1MjkiIGNsYXNzPSJib2R5Ij5BQ1RJVkUgwrcgaWQgPSB0eGlkKFQwKTwvdGV4dD4KPHRleHQgeD0iNTc0IiB5PSI1NTMiIGNsYXNzPSJzbWFsbCI+UzEgaW5jbHVkZXMgdGhlIGFwcGxpY2F0aW9uIHJvb3Q8L3RleHQ+CjxyZWN0IHg9IjEwMDgiIHk9IjEyMiIgd2lkdGg9IjM2OCIgaGVpZ2h0PSI0NzQiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjZDJkZGUyIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHJlY3QgeD0iMTAwOCIgeT0iMTIyIiB3aWR0aD0iMzY4IiBoZWlnaHQ9IjYyIiByeD0iMTIiIGZpbGw9IiNlYWYxZjQiIHN0cm9rZT0iI2QyZGRlMiIgc3Ryb2tlLXdpZHRoPSIxLjUiIC8+Cjx0ZXh0IHg9IjEwMzIiIHk9IjE2MSIgY2xhc3M9ImxhYmVsIj5UMiDCtyBDb250aW51YXRpb248L3RleHQ+Cjx0ZXh0IHg9IjEwMzIiIHk9IjIyMiIgY2xhc3M9ImxhYmVsIj5JbnB1dCAwPC90ZXh0Pgo8dGV4dCB4PSIxMDMyIiB5PSIyNTYiIGNsYXNzPSJib2R5Ij5TcGVuZCBVMSA9ICh0eGlkKFQxKSwgMCk8L3RleHQ+CjxyZWN0IHg9IjEwMjgiIHk9IjI5NCIgd2lkdGg9IjMyOCIgaGVpZ2h0PSI5OCIgcng9IjEyIiBmaWxsPSIjZWRmNmYzIiBzdHJva2U9IiM5ZWJmYWYiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8dGV4dCB4PSIxMDQ2IiB5PSIzMzEiIGNsYXNzPSJsYWJlbCI+T3V0cHV0IDAgwrcgTWFpbiBwcm9ncmFtIFA8L3RleHQ+Cjx0ZXh0IHg9IjEwNDYiIHk9IjM2OSIgY2xhc3M9Im1vbm8iPnZhdWx0ID0gQjI8L3RleHQ+Cjx0ZXh0IHg9IjEwMzIiIHk9IjQzMiIgY2xhc3M9InNtYWxsIj5NaWRkbGUgb3V0cHV0czogY29uc3RyYWluZWQgcm9sZXM8L3RleHQ+CjxyZWN0IHg9IjEwMjgiIHk9IjQ1OCIgd2lkdGg9IjMyOCIgaGVpZ2h0PSIxMTQiIHJ4PSIxMiIgZmlsbD0iI2VlZjJmYiIgc3Ryb2tlPSIjYWZiZmRjIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHRleHQgeD0iMTA0NiIgeT0iNDk1IiBjbGFzcz0ibGFiZWwiPkxhc3Qgb3V0cHV0IMK3IENhYm9vc2U8L3RleHQ+Cjx0ZXh0IHg9IjEwNDYiIHk9IjUyOSIgY2xhc3M9ImJvZHkiPkFDVElWRSDCtyBpZCA9IHR4aWQoVDApPC90ZXh0Pgo8dGV4dCB4PSIxMDQ2IiB5PSI1NTMiIGNsYXNzPSJzbWFsbCI+UzIgaW5jbHVkZXMgdGhlIGFwcGxpY2F0aW9uIHJvb3Q8L3RleHQ+Cjxwb2x5bGluZSBwb2ludHM9IjQzMiwzNDMgNDc1LDM0MyA0NzUsMjM1IDUzNSwyMzUiIGNsYXNzPSJlZGdlIiAvPgo8cG9seWxpbmUgcG9pbnRzPSI5MDQsMzQzIDk0NywzNDMgOTQ3LDIzNSAxMDA3LDIzNSIgY2xhc3M9ImVkZ2UiIC8+Cjx0ZXh0IHg9IjQ3NCIgeT0iMzc3IiBjbGFzcz0ic21hbGwiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlNwZW5kPC90ZXh0Pgo8dGV4dCB4PSI5NDYiIHk9IjM3NyIgY2xhc3M9InNtYWxsIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5TcGVuZDwvdGV4dD4KPHRleHQgeD0iNjQiIHk9IjY0NiIgY2xhc3M9InN1YiI+T2xkIGNhYm9vc2VzIGFyZSBub3Qgc3BlbnQuIE9ubHkgbWFpbi1wcm9ncmFtIG91dHB1dHMgZm9ybSB0aGUgY29udGludW91cyBsaW5lYWdlLjwvdGV4dD4KPC9zdmc+" alt="Genesis and subsequent transition structure"></p>
+<p>Figure 2. Solid arrows represent spends of main-program outputs. Old cabooses remain in their creating transactions and are not consumed along the main-program chain. Each state and vault output are bound by the same creating transaction.</p>
+<p><a id="s9"></a></p>
+<h2>9. Transaction Introspection and Commitment Authentication</h2>
+<h3>9.1 Fixed Signature Configuration</h3>
+<p><strong>INT-1</strong>: The signature used for main-program introspection MUST use <code>SIGHASH_ALL = 0x01</code>. It MUST NOT use ANYONECANPAY, NONE, or SINGLE. Set <code>ext_flag = 1</code>, omit the annex, and use <code>key_version = 0</code>. No OP_CODESEPARATOR may execute before the introspection signature check, so <code>codesep_pos = 0xffffffff</code>.</p>
+<p><strong>INT-2</strong>: The actual signature message MUST authenticate all input outpoints, amounts, spent-output scriptPubKeys, and sequences, together with all outputs. The corresponding fields are <code>sha_prevouts</code>, <code>sha_amounts</code>, <code>sha_scriptpubkeys</code>, <code>sha_sequences</code>, and <code>sha_outputs</code>. Every vector MUST be reconstructed in full, in order, using canonical serialization. The first four vectors MUST correspond to the same input count. <a href="https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki#common-signature-message">BIP 341</a></p>
+<p><strong>INT-3</strong>: The actual input index 0, tapleaf_hash, and Tapscript extension MUST be bound. The <code>tapleaf_hash</code> commits to the executed script; the scriptPubKey is authenticated through the spent-output commitment. These MUST NOT be conflated as <code>scriptCode</code>. <a href="https://github.com/bitcoin/bips/blob/master/bip-0342.mediawiki#common-signature-message-extension">BIP 342</a></p>
+<p>The commitments use SHA256 subhashes. A hash is not an interface for reading its fields: the witness provides structured data, and the script reconstructs and verifies the commitment. <code>sha_sequences</code> does not commit to outputs.</p>
+<h3>9.2 CAT/Schnorr Construction Requirements</h3>
+<p>The reference repository&#39;s G/G Schnorr trick MAY implement INT-1 through INT-3, but its <code>0x81</code> configuration is not adopted here. In this construction, both the BIP340 public key and R are G. Interpret the raw challenge hash as a big-endian integer e. Vary r until the challenge hash ends in <code>0x01</code>, construct <code>s = e + 1</code>, and verify the signature <code>bytes32_be(x(G)) || bytes32_be(s) || 0x01</code>. The first two components are respectively a 32-byte big-endian coordinate and scalar. <a href="https://github.com/Bitcoin-Wildlife-Sanctuary/covenants-gadgets/blob/93e057f2abdac14760b6a8ff82ee4a613a263153/src/bitcoin_script.rs#L241-L271">Reference signature construction</a></p>
+<p><strong>INT-4</strong>: This specific construction MUST require the raw challenge integer to satisfy <code>e &lt; n-1</code>, where n is the secp256k1 group order, to avoid an out-of-range scalar in this simplified increment. The challenge bytes, signature bytes, and actual signature message used by the script MUST agree. Unbound challenge hints MUST NOT be accepted. If the randomizer search is exhausted, the transaction constructor MUST report failure rather than bypass the condition. <a href="https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki">BIP 340</a></p>
+<p>G has private key 1. It serves the introspection construction, not the unknown-discrete-log internal-point requirement in ENV-2.</p>
+<h3>9.3 Logical Witness Contents</h3>
+<p><strong>WIT-1</strong>: At minimum, the witness MUST enable the validator to obtain and authenticate: the complete field vectors of X described above; the non-witness fields of T and Q; the old and new state envelopes and their respective randomizers; application-state openings or proofs and action authorization; and any required introspection-construction hints.</p>
+<p><strong>WIT-2</strong>: An implementation MAY omit constant fields from its witness under a fixed template, but MUST insert their exact values during script reconstruction. Every dynamic field MUST be bound through the corresponding hash and consensus message.</p>
+<p>This document specifies what the witness must establish, not the stack-item order of every application Taproot leaf. Deployments MUST publish their stack layout and serialization scheme. Witnesses for different applications need not be interchangeable.</p>
+<p><a id="s10"></a></p>
+<h2>10. Genesis and Continuation Validation Algorithm</h2>
+<h3>10.1 Common Authentication</h3>
+<p>Let X be the transaction whose main-program spend is being validated. Its input 0 spends output 0 of parent T. Let <code>T.input[0].prevout = (q, k)</code>, and let Q be the transaction with txid q.</p>
+<p><strong>AUTH-1</strong>: Authenticate X&#39;s complete inputs, outputs, and signature context, and enforce the TX, LIN, ROLE, and INT rules.</p>
+<p><strong>AUTH-2</strong>: Reconstruct T and require <code>H256(EncodeTx(T)) = X.input[0].prevout.txid</code>. The script and amount of T.output[0] MUST equal the actual <code>Spent(X,0)</code>. Validate T&#39;s protocol transaction format, complete output layout, and designated caboose commitment to the old state S.</p>
+<p><strong>AUTH-3</strong>: Reconstruct Q, require <code>H256(EncodeTx(Q)) = q</code> and <code>k &lt; len(Q.output)</code>, and read <code>Q.output[k]</code>. T&#39;s input serialization contains the outpoint, not the script of the spent output. Q supplies the authenticated source of that script.</p>
+<p><strong>AUTH-4</strong>: Select the branch using the authenticated <code>Q.output[k].scriptPubKey</code>. Input count, the old state&#39;s phase, or a caller assertion alone MUST NOT determine the branch.</p>
+<p><strong>AUTH-5</strong>: Verify that X&#39;s designated caboose commits to the new state S′, and enforce the accounting rules in Section 13 together with application-state and authorization validation.</p>
+<h3>10.2 Genesis Branch</h3>
+<p>When <code>Q.output[k].scriptPubKey ∉ M</code>:</p>
+<p><strong>INIT-1</strong>: T MUST satisfy GEN-1 and GEN-2. Q.output[k] MUST satisfy the permitted-funding-source predicate.</p>
+<p><strong>INIT-2</strong>: S MUST be GENESIS. The initial application state, initial vault, and creation context MUST pass <code>Init(D, T, Q.output[k], S, proof)</code>.</p>
+<p><strong>INIT-3</strong>: S′ MUST be ACTIVE, and <code>S′.genesis_id</code> MUST equal <code>H256(EncodeTx(T))</code>.</p>
+<p><strong>INIT-4</strong>: The first application transition MUST pass <code>First(D, S, S′, X, action, proof)</code>.</p>
+<p>Here T is T0 and X is T1. The “genesis branch” executes when T0&#39;s output is first spent; it does not imply execution of the new output script when T0 was created.</p>
+<h3>10.3 Continuation Branch</h3>
+<p>When <code>Q.output[k].scriptPubKey = P</code>:</p>
+<p><strong>NEXT-1</strong>: Require k = 0. T&#39;s input 0 therefore actually spends output 0 of the preceding P instance.</p>
+<p><strong>NEXT-2</strong>: S and S′ MUST both be ACTIVE, and their 32-byte genesis_id fields MUST be identical byte for byte.</p>
+<p><strong>NEXT-3</strong>: The application transition MUST pass <code>Step(D, S, S′, X, action, proof)</code>.</p>
+<p>This branch depends on T being an actual valid ancestor and on every available spending path of P enforcing this protocol. T&#39;s actual spend already performed the previous round of identity authentication. Checking only a similar-looking leaf MUST NOT substitute for that premise.</p>
+<h3>10.4 Rejection</h3>
+<p><strong>REJECT-1</strong>: If the predecessor script belongs to <code>M \ {P}</code>, or if any requirement above fails, the main-program spend MUST fail. Migration between main-program scripts is outside this version.</p>
+<h3>10.5 Normative Pseudocode</h3>
+<p>The following function calls denote authenticated checks, not permission to trust identically named witness fields. <code>RequireOutputLayout(T,D)</code> verifies the parent&#39;s structural output requirements, including unique P, the designated trailing caboose, and the auxiliary region. The continuation branch does not require all of T&#39;s historical application-authorization proofs to be supplied again; it relies on T&#39;s actual valid spend.</p>
+<pre><code class="language-text">ValidateSpend(X, witness, D):
+    cur = AuthenticateAllCommittedFields(X, witness, SIGHASH_ALL)
+    RequireExecutionContext(cur, index=0, annex=false)
+    RequireProtocolFormatAndResourceBounds(X)
+    RequireCompleteRolePartition(X, cur.spent_outputs, D)
+    Require(cur.spent_outputs[0].script == P)
+    Require(X.input[0].prevout.vout == 0)
+
+    T = AuthenticateTransaction(witness.parent,
+                                X.input[0].prevout.txid)
+    RequireProtocolFormatAndResourceBounds(T)
+    Require(T.output[0] == cur.spent_outputs[0])
+    RequireOutputLayout(T, D)
+    S = AuthenticateCaboose(T.last_output, witness.old_state,
+                           witness.old_randomizer, D.c)
+
+    (q, k) = T.input[0].prevout
+    Q = AuthenticateTransaction(witness.grandparent, q)
+    RequireReflectionResourceBounds(Q)
+    Require(k &lt; Q.output_count)
+    predecessor = Q.output[k]
+
+    Snew = AuthenticateCaboose(X.last_output, witness.new_state,
+                              witness.new_randomizer, D.c)
+
+    if predecessor.script not in M:
+        Require(T.input_count == 1)
+        RequireAllowedGenesisFunding(predecessor, D)
+        Require(S.phase == GENESIS)
+        Require(Init(D, T, predecessor, S, witness.app_proof))
+        Require(Snew.phase == ACTIVE)
+        Require(Snew.id == H256(EncodeTx(T)))
+        Require(First(D, S, Snew, X, witness.action, witness.app_proof))
+    else if predecessor.script == P:
+        Require(k == 0)
+        Require(S.phase == ACTIVE and Snew.phase == ACTIVE)
+        Require(Snew.id == S.id)
+        Require(Step(D, S, Snew, X, witness.action, witness.app_proof))
+    else:
+        Reject()
+
+    RequireVaultAccounting(X, cur.spent_outputs, S, Snew, D)
+    Accept()
+</code></pre>
+<p><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNDQwIiBoZWlnaHQ9IjgzMCIgdmlld0JveD0iMCAwIDE0NDAgODMwIiByb2xlPSJpbWciIGFyaWEtbGFiZWxsZWRieT0idGl0bGUgZGVzYyI+Cjx0aXRsZSBpZD0idGl0bGUiPlR3by1nZW5lcmF0aW9uIGJhY2t0cmFjZTogZ2VuZXNpcyBvciBjb250aW51YXRpb24/PC90aXRsZT48ZGVzYyBpZD0iZGVzYyI+WCByZWZlcmVuY2VzIHRoZSBtYWluLXByb2dyYW0gb3V0cHV0IG9mIFQuIElucHV0IDAgb2YgVCByZWZlcmVuY2VzIGFuIG91dHB1dCBvZiBRLiBBdXRoZW50aWNhdGUgUSB0byBzZWxlY3QgZ2VuZXNpcywgY29udGludWF0aW9uLCBvciByZWplY3Rpb24uPC9kZXNjPgo8ZGVmcz48bWFya2VyIGlkPSJhcnJvdyIgdmlld0JveD0iMCAwIDEwIDEwIiByZWZYPSI5IiByZWZZPSI1IiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiBvcmllbnQ9ImF1dG8tc3RhcnQtcmV2ZXJzZSI+PHBhdGggZD0iTSAwIDAgTCAxMCA1IEwgMCAxMCB6IiBmaWxsPSIjNTI2Nzc3IiAvPjwvbWFya2VyPjwvZGVmcz4KPHN0eWxlPnRleHR7Zm9udC1mYW1pbHk6QXJpYWwsSGVsdmV0aWNhLHNhbnMtc2VyaWY7ZmlsbDojMjAzMzNkfSAudGl0bGV7Zm9udC1zaXplOjMycHg7Zm9udC13ZWlnaHQ6NjUwfSAuc3Vie2ZvbnQtc2l6ZToxOXB4O2ZpbGw6IzU5NzE3ZX0gLmxhYmVse2ZvbnQtc2l6ZToyMnB4O2ZvbnQtd2VpZ2h0OjYwMH0gLmJvZHl7Zm9udC1zaXplOjIwcHh9IC5zbWFsbHtmb250LXNpemU6MTdweDtmaWxsOiM1OTcxN2V9IC5tb25ve2ZvbnQtZmFtaWx5Ok1lbmxvLENvbnNvbGFzLG1vbm9zcGFjZTtmb250LXNpemU6MThweH0gLmVkZ2V7ZmlsbDpub25lO3N0cm9rZTojNTI2Nzc3O3N0cm9rZS13aWR0aDoyLjU7bWFya2VyLWVuZDp1cmwoI2Fycm93KX0gPC9zdHlsZT4KPHJlY3Qgd2lkdGg9IjE0NDAiIGhlaWdodD0iODMwIiBmaWxsPSIjZjhmYWZiIiAvPgo8dGV4dCB4PSI2NCIgeT0iNTQiIGNsYXNzPSJ0aXRsZSI+VHdvLWdlbmVyYXRpb24gYmFja3RyYWNlOiBnZW5lc2lzIG9yIGNvbnRpbnVhdGlvbj88L3RleHQ+Cjx0ZXh0IHg9IjY0IiB5PSI4OCIgY2xhc3M9InN1YiI+QmluZCBhY3R1YWwgdHJhbnNhY3Rpb25zIGFuZCBvdXRwb2ludHMgZmlyc3Q7IHRoZW4gaW5zcGVjdCB0aGUgcHJlZGVjZXNzb3Igc2NyaXB0LiBEbyBub3QgdHJ1c3QgcGhhc2UgYWxvbmUuPC90ZXh0Pgo8cmVjdCB4PSI2NCIgeT0iMTM3IiB3aWR0aD0iMzg4IiBoZWlnaHQ9IjE3MyIgcng9IjEyIiBmaWxsPSIjZmZmZmZmIiBzdHJva2U9IiNkMmRkZTIiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8cmVjdCB4PSI1MjYiIHk9IjEzNyIgd2lkdGg9IjM4OCIgaGVpZ2h0PSIxNzMiIHJ4PSIxMiIgZmlsbD0iI2ZmZmZmZiIgc3Ryb2tlPSIjZDJkZGUyIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHJlY3QgeD0iOTg4IiB5PSIxMzciIHdpZHRoPSIzODgiIGhlaWdodD0iMTczIiByeD0iMTIiIGZpbGw9IiNmZmZmZmYiIHN0cm9rZT0iI2QyZGRlMiIgc3Ryb2tlLXdpZHRoPSIxLjUiIC8+Cjx0ZXh0IHg9Ijg4IiB5PSIxNzYiIGNsYXNzPSJsYWJlbCI+R3JhbmRwYXJlbnQgUTwvdGV4dD4KPHRleHQgeD0iODgiIHk9IjIxNCIgY2xhc3M9ImJvZHkiPm91dHB1dFtrXSA9IHByZWRlY2Vzc29yPC90ZXh0Pgo8dGV4dCB4PSI4OCIgeT0iMjUwIiBjbGFzcz0iYm9keSI+UmVhZCBpdHMgYWN0dWFsIHNjcmlwdFB1YktleTwvdGV4dD4KPHRleHQgeD0iODgiIHk9IjI4MSIgY2xhc3M9InNtYWxsIj5BdCBnZW5lc2lzOiBmdW5kaW5nIHByZXBhcmF0aW9uPC90ZXh0Pgo8dGV4dCB4PSI1NTAiIHk9IjE3NiIgY2xhc3M9ImxhYmVsIj5QYXJlbnQgVDwvdGV4dD4KPHRleHQgeD0iNTUwIiB5PSIyMTQiIGNsYXNzPSJtb25vIj5pbnB1dFswXSDihpIgKHR4aWQoUSksIGspPC90ZXh0Pgo8dGV4dCB4PSI1NTAiIHk9IjI1MCIgY2xhc3M9ImJvZHkiPm91dHB1dFswXSA9IFA7IHN0YXRlIFMgYXQgdGFpbDwvdGV4dD4KPHRleHQgeD0iMTAxMiIgeT0iMTc2IiBjbGFzcz0ibGFiZWwiPkN1cnJlbnQgdHJhbnNhY3Rpb24gWDwvdGV4dD4KPHRleHQgeD0iMTAxMiIgeT0iMjE0IiBjbGFzcz0ibW9ubyI+aW5wdXRbMF0g4oaSICh0eGlkKFQpLCAwKTwvdGV4dD4KPHRleHQgeD0iMTAxMiIgeT0iMjUwIiBjbGFzcz0iYm9keSI+b3V0cHV0WzBdID0gUDsgc3RhdGUgU+KAsiBhdCB0YWlsPC90ZXh0Pgo8cG9seWxpbmUgcG9pbnRzPSI0NTIsMjI0IDUyNSwyMjQiIGNsYXNzPSJlZGdlIiAvPgo8cG9seWxpbmUgcG9pbnRzPSI5MTQsMjI0IDk4NywyMjQiIGNsYXNzPSJlZGdlIiAvPgo8cmVjdCB4PSI0NzAiIHk9IjM2OSIgd2lkdGg9IjUwMCIgaGVpZ2h0PSI4MCIgcng9IjEyIiBmaWxsPSIjZWFmMWY0IiBzdHJva2U9IiNiNWM5ZDMiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8dGV4dCB4PSI3MjAiIHk9IjQwMyIgY2xhc3M9ImxhYmVsIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5BdXRoZW50aWNhdGVkIHByZWRlY2Vzc29yIHNjcmlwdD88L3RleHQ+Cjx0ZXh0IHg9IjcyMCIgeT0iNDMxIiBjbGFzcz0ic21hbGwiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlJlYWQgUS5vdXRwdXRba10uc2NyaXB0UHViS2V5PC90ZXh0Pgo8cG9seWxpbmUgcG9pbnRzPSIyNTgsMzEwIDI1OCwzNDEgNzIwLDM0MSA3MjAsMzY4IiBjbGFzcz0iZWRnZSIgLz4KPHBvbHlsaW5lIHBvaW50cz0iNTg1LDQ0OSA1ODUsNDg3IDI1OCw0ODcgMjU4LDUzMyIgY2xhc3M9ImVkZ2UiIC8+Cjxwb2x5bGluZSBwb2ludHM9IjcyMCw0NDkgNzIwLDUzMyIgY2xhc3M9ImVkZ2UiIC8+Cjxwb2x5bGluZSBwb2ludHM9Ijg1NSw0NDkgODU1LDQ4NyAxMTgyLDQ4NyAxMTgyLDUzMyIgY2xhc3M9ImVkZ2UiIC8+CjxyZWN0IHg9IjY0IiB5PSI1MzQiIHdpZHRoPSIzODgiIGhlaWdodD0iMTcyIiByeD0iMTIiIGZpbGw9IiNlZWYyZmIiIHN0cm9rZT0iI2FmYmZkYyIgc3Ryb2tlLXdpZHRoPSIxLjUiIC8+CjxyZWN0IHg9IjUyNiIgeT0iNTM0IiB3aWR0aD0iMzg4IiBoZWlnaHQ9IjE3MiIgcng9IjEyIiBmaWxsPSIjZWRmNmYzIiBzdHJva2U9IiM5ZWJmYWYiIHN0cm9rZS13aWR0aD0iMS41IiAvPgo8cmVjdCB4PSI5ODgiIHk9IjUzNCIgd2lkdGg9IjM4OCIgaGVpZ2h0PSIxNzIiIHJ4PSIxMiIgZmlsbD0iI2Y4ZWVlZSIgc3Ryb2tlPSIjZDdiYWJhIiBzdHJva2Utd2lkdGg9IjEuNSIgLz4KPHRleHQgeD0iODgiIHk9IjU3NCIgY2xhc3M9ImxhYmVsIj5PdXRzaWRlIE0gwrcgR2VuZXNpczwvdGV4dD4KPHRleHQgeD0iODgiIHk9IjYxMyIgY2xhc3M9ImJvZHkiPk9uZSBpbnB1dCBpbiBUOyBTIGlzIEdFTkVTSVM8L3RleHQ+Cjx0ZXh0IHg9Ijg4IiB5PSI2NTIiIGNsYXNzPSJib2R5Ij5T4oCyIEFDVElWRTsgaWQgPSB0eGlkKFQpPC90ZXh0Pgo8dGV4dCB4PSI4OCIgeT0iNjgyIiBjbGFzcz0ic21hbGwiPkFsc28gZW5mb3JjZSBJbml0IGFuZCBGaXJzdDwvdGV4dD4KPHRleHQgeD0iNTUwIiB5PSI1NzQiIGNsYXNzPSJsYWJlbCI+RXF1YWwgdG8gUCDCtyBDb250aW51YXRpb248L3RleHQ+Cjx0ZXh0IHg9IjU1MCIgeT0iNjEzIiBjbGFzcz0iYm9keSI+ayA9IDA7IFMgYW5kIFPigLIgYXJlIEFDVElWRTwvdGV4dD4KPHRleHQgeD0iNTUwIiB5PSI2NTIiIGNsYXNzPSJtb25vIj5T4oCyLmlkID0gUy5pZDwvdGV4dD4KPHRleHQgeD0iNTUwIiB5PSI2ODIiIGNsYXNzPSJzbWFsbCI+QWxzbyBlbmZvcmNlIFN0ZXAgYW5kIGFjY291bnRpbmc8L3RleHQ+Cjx0ZXh0IHg9IjEwMTIiIHk9IjU3NCIgY2xhc3M9ImxhYmVsIj5JbiBNLCBidXQgbm90IGVxdWFsIHRvIFA8L3RleHQ+Cjx0ZXh0IHg9IjEwMTIiIHk9IjYyNCIgY2xhc3M9InRpdGxlIj5SZWplY3Q8L3RleHQ+Cjx0ZXh0IHg9IjEwMTIiIHk9IjY3NCIgY2xhc3M9InNtYWxsIj5TY3JpcHQgbWlncmF0aW9uIGlzIG5vdCBzdXBwb3J0ZWQ8L3RleHQ+Cjx0ZXh0IHg9IjY0IiB5PSI3NjUiIGNsYXNzPSJzdWIiPlByZW1pc2U6IFQgdmFsaWRseSBzcGVudCBQLCBhbmQgZXZlcnkgUCBzcGVuZGluZyBwYXRoIGVuZm9yY2VzIHRoZSBzYW1lIGlkZW50aXR5IGNoZWNrcy48L3RleHQ+Cjx0ZXh0IHg9IjY0IiB5PSI3OTciIGNsYXNzPSJzbWFsbCI+QmFja3RyYWNlIGRlcHRoIGlzIGJvdW5kZWQ7IHRyYW5zYWN0aW9uIHNpemUsIHN0YXRlIHByb29mcywgYW5kIGV4ZWN1dGlvbiBjb3N0IHJlbWFpbiByZXNvdXJjZS1saW1pdGVkLjwvdGV4dD4KPC9zdmc+" alt="Two-generation backtrace and authenticated branch selection"></p>
+<p>Figure 3. Q authenticates the actual predecessor script for T&#39;s input 0. The continuation branch relies on the consensus validity of T&#39;s spend of P. It does not require another opening of Q&#39;s application state or the complete earlier history.</p>
+<p><a id="s11"></a></p>
+<h2>11. Identity, Unique Succession, and Conditional Arguments</h2>
+<h3>11.1 Meaning of Authenticated Identity</h3>
+<p>An output with P and a well-formed caboose is merely a <em>candidate output</em>. A candidate that satisfies the genesis conditions is a genesis candidate. An ACTIVE output produced by a valid protocol transition belongs to an authenticated lineage. External acceptors MUST NOT equate “parsable” with “authenticated origin.”</p>
+<p>Authenticating the intended chain also requires comparison against a known <code>expected_genesis_id</code>. An attacker creating a new instance with a different valid id has not forged an identity. Accepting any id instead of the expected one is a caller authentication-policy error.</p>
+<h3>11.2 Inductive Argument</h3>
+<p><strong>Base case.</strong> Ordinary funds create an arbitrary <code>P + ACTIVE(copied_id)</code> output. At its first spend, Q authenticates its actual non-main-program origin. The genesis branch applies, but INIT-2 requires GENESIS, so the spend fails. If the attacker instead creates a valid GENESIS state, INIT-3 assigns the new creation transaction&#39;s own txid.</p>
+<p><strong>Inductive step.</strong> If parent T spends P, ENV-2 requires it to satisfy the same protocol checks. T can only establish the first active identity or preserve the previous identity unchanged. Once the current execution authenticates that actual spending relationship through Q, it can inherit this conclusion.</p>
+<p>This argument depends on a correct complete implementation and the stated cryptographic assumptions. It does not replace reference scripts, adversarial tests, or a formal proof. In particular, implementations must establish that an arbitrarily created counterfeit P output cannot become a valid entry point into the inductive lineage.</p>
+<h3>11.3 Single Lineage</h3>
+<p>Every valid genesis creates one main-program output; every valid transition produces one successor. Within a fixed valid chain view, an actual outpoint cannot be validly spent twice. Consequently, each authenticated identity has at most one current unspent main-program output.</p>
+<p>Under these constraints, the main-program output index is always 0, so the identifier need not repeat vout. This uniqueness belongs to this protocol and the selected chain context. It does not mean that any arbitrary transaction txid inherently identifies only one arbitrary program.</p>
+<p>A single lineage does not exclude reorganizations, conflicting candidate transactions, or halted progress. Following a reorganization, observers must roll back their state index to match the target chain view.</p>
+<h3>11.4 Verification Depth</h3>
+<p>Each spend supplies T and Q, so historical backtrace depth does not grow with program lifetime. Byte size and execution cost still depend on transaction size, application proofs, script paths, and the resource profile. The construction MUST NOT be described as having unconditional constant cost.</p>
+<p><a id="s12"></a></p>
+<h2>12. Verification by Observers and Auxiliary Contracts</h2>
+<h3>12.1 Observers</h3>
+<p><strong>VERIFY-1</strong>: An observer MUST establish the target-chain context, expected P, and expected genesis_id, and authenticate the actual transactions and their validity used in its reasoning. A full node may use its validated ledger. An observer holding only raw transaction bytes does not satisfy this requirement.</p>
+<p>For an initial output, the observer checks T0, its funding predecessor Q, the genesis format, and the initial state. For an ACTIVE output, the observer may authenticate that its creating transaction actually spent the expected P and use protocol induction under ENV-2 and a validated transaction context. If these premises have not been established, it should backtrace explicitly or use another defined proof mechanism.</p>
+<p><strong>VERIFY-2</strong>: Recognizing the <em>current</em> state also requires verifying that the main-program output is unspent in the selected chain view. A block-inclusion proof alone does not establish unspentness.</p>
+<h3>12.2 Auxiliary Contracts in the Same Transaction</h3>
+<p><strong>VERIFY-3</strong>: An auxiliary contract at index j &gt; 0 MUST independently authenticate the actual transaction fields it uses, confirm that input 0 spends the expected P, and compare the expected genesis_id. It MUST NOT assume that another script&#39;s success makes arbitrary witness fields trustworthy.</p>
+<p>The auxiliary contract can authenticate parent T and the old caboose, or authenticate the new caboose through the complete output commitment. All inputs must succeed for the transaction to be valid. The main-program spend therefore executes Section 10&#39;s identity checks without requiring a separate “script call succeeded” opcode.</p>
+<p><strong>VERIFY-4</strong>: The auxiliary contract MUST specify whether the interaction refers to the state before or after the transition. The old state in the first transition has no id. To authenticate the new identity in that case, the contract MUST check that the new state&#39;s id equals the genesis txid referenced by input 0, together with the remaining interaction conditions.</p>
+<p>This mechanism permits auxiliary contracts to participate in a single-main-program transition. It does not permit two independent main programs that both require index 0 to advance together. A complete cross-chain messaging protocol is outside this specification.</p>
+<h3>12.3 Historical Queries Without a Joint Spend</h3>
+<p><strong>VERIFY-5</strong>: Without an actual joint-spending relationship, historical transactions and state openings MUST be bound to an independently authenticated historical anchor or chain proof. Recomputing a txid alone proves neither that the transaction exists in the target chain nor that it represents the latest state.</p>
+<p><a id="s13"></a></p>
+<h2>13. Vault Amounts and Authorization</h2>
+<p><strong>VALUE-1</strong>: The old vault amount MUST come from <code>Spent(X,0).value</code>; the new amount MUST come from <code>X.output[0].value</code>. If application state tracks balances, assets and liabilities, or withdrawal limits, their relationship to the actual amounts MUST be verified.</p>
+<p><strong>VALUE-2</strong>: The application MUST explicitly authorize every deposit, expenditure, and cost borne by the vault. One permitted accounting form is:</p>
+<pre><code class="language-text">B_new = B_old + authorized_deposits
+                 - authorized_withdrawals
+                 - allowed_vault_costs
+</code></pre>
+<p>Every term MUST correspond to authenticated actual inputs, outputs, or an explicit fee allocation. The miner fee equals total input amounts minus total output amounts; it cannot be inferred solely from the change in the main-program balance.</p>
+<p><strong>VALUE-3</strong>: The configuration MUST specify who pays the miner fee, caboose amount c, and other costs. Calculations MUST use exact integers and check ranges and overflow. Identity and linear continuity alone do not prevent vault funds from being converted into miner fees.</p>
+<p><a id="s14"></a></p>
+<h2>14. Resource Profile and State Data</h2>
+<h3>14.1 R1 Reflection Profile</h3>
+<p>The R1 profile gives this draft&#39;s direct CAT-reflection construction explicit resource bounds:</p>
+<p><strong>RES-1</strong>: The non-witness serialization of every protocol transaction MUST NOT exceed 520 bytes. Each reflected T and Q MUST also fit within 520 bytes. Every intermediate CAT result, hash-input stack element, and initial witness stack element MUST independently satisfy the target environment&#39;s limits.</p>
+<p><strong>RES-2</strong>: Every input scriptSig in Q MUST be empty, matching this profile&#39;s reflection input model. All remaining fields MUST be reconstructed completely and canonically. In the continuation case, Q is itself a protocol transaction. In the first-transition case, the funding-preparation transaction Q MUST also satisfy this restriction. Funding parties may need to construct a suitable preparation transaction first.</p>
+<p><strong>RES-3</strong>: Output-script lengths, field lengths, complete vector counts, and parsing boundaries MUST be verified. Implementations MUST NOT rely on a caller-asserted transaction length or split oversized data into chunks and claim that this produces the same SHA256 result. Any separately implemented streaming hash requires its own correctness argument and a distinct resource profile.</p>
+<p>The 520-byte limit applies to an individual stack element, not the entire transaction including witness. Tapscript also imposes stack-count and signature-operation-budget constraints, which application scripts and proofs must satisfy. <a href="https://github.com/bitcoin/bips/blob/master/bip-0342.mediawiki#resource-limits">BIP 342 resource limits</a>, <a href="https://github.com/bitcoin/bips/blob/master/bip-0347.mediawiki#specification">BIP 347</a></p>
+<p>R1 is a deliberately conservative baseline, not a claim that OP_CAT cannot support other designed resource schemes. An extension of R1 MUST preserve all identity and role constraints in this protocol.</p>
+<h3>14.2 State Data Availability</h3>
+<p><strong>DATA-1</strong>: Deployments MUST define how application-state data, proof material, state envelopes, and randomizers are retained or published so that a successor witness can be constructed. A caboose commits to hashes; it does not automatically publish the underlying state data.</p>
+<p>State data can come from untrusted sources and be checked against commitments. This does not guarantee that the data will remain recoverable. Missing data can prevent an otherwise valid main program from advancing.</p>
+<p><a id="s15"></a></p>
+<h2>15. Rationale</h2>
+<p><strong>Using txid as identity.</strong> A fixed main-program output index and one main-program instance per valid creating transaction make its txid sufficient to name the instance. No external identity registrar is needed, although callers still need to know their expected id.</p>
+<p><strong>Writing the id at the first transition.</strong> Including T0&#39;s txid in T0&#39;s own output commitment would introduce self-reference. Deferring the write to T1 avoids that dependency. The reason is not that a SegWit transaction must be signed before its txid can be calculated: witness is excluded from txid serialization.</p>
+<p><strong>Caboose and a fixed P.</strong> The fixed P carries execution rules and the vault, while the P2WSH caboose commits to changing state. Its hash can be reconstructed in Script without recomputing a Taproot output point for every state update.</p>
+<p><strong>The last output.</strong> Keeping the caboose at the end fixes the main program at output 0 and leaves a clearly defined intermediate region for withdrawals, change, and other roles. With exactly two outputs, this matches the reference repository&#39;s layout.</p>
+<p><strong>Complete input commitments.</strong> Omitting ANYONECANPAY allows all input scripts, amounts, and positions to be authenticated, supports exclusion checks over the input set, and provides a common basis for fees and auxiliary-contract verification.</p>
+<p><strong>Two generations rather than one.</strong> Parent T&#39;s inputs do not contain the scriptPubKeys of the outputs they spend. Grandparent Q authenticates the relevant predecessor script; the protocol then reasons inductively from the rules already enforced by the same P. Omitting Q and simply trusting a claim that the parent&#39;s input was also the program removes a necessary binding.</p>
+<p><strong>An application root rather than an arbitrarily large envelope.</strong> A fixed 32-byte app_root makes the identity layer&#39;s encoding and resource use predictable. Application-state size and proof format remain application-defined.</p>
+<p><a id="s16"></a></p>
+<h2>16. Backward Compatibility and Deployment</h2>
+<p>This protocol uses existing outpoints, P2TR, P2WSH, and transaction serialization. It allocates no new address version or transaction field. Execution requires the specified OP_CAT semantics in the target environment; this document does not define an OP_CAT activation process.</p>
+<p>Existing <code>covenants-gadgets</code> commitments provide a caboose construction reference, but its state encoding, <code>0x81</code> signature mode, limited transaction templates, and initialization handling do not establish compliance with this draft. Existing outputs cannot acquire these rules through a client-only update. Deployment requires corresponding new main-program scripts and instances.</p>
+<p>This version does not support script upgrades, termination, or migration that preserve the original id. Such extensions require separate definitions and a renewed review of the inductive argument and external verification policy.</p>
+<p><a id="s17"></a></p>
+<h2>17. Reference Components, Examples, and Validation Status</h2>
+<p>The reference components are pinned to <a href="https://github.com/Bitcoin-Wildlife-Sanctuary/covenants-gadgets/tree/93e057f2abdac14760b6a8ff82ee4a613a263153"><code>covenants-gadgets</code> commit <code>93e057f2abdac14760b6a8ff82ee4a613a263153</code></a>. The caboose construction, CAT/Schnorr trick, signature-message gadgets, and transaction-serialization gadgets were inspected. Its 18 existing library tests passed, including simulated counter transitions. The initialization test inserts an initial transaction directly; it does not implement this document&#39;s genesis authentication.</p>
+<p>Accompanying files:</p>
+<ul>
+<li><a href="implementation-notes.md">Implementation mapping and research tasks</a>: differences between existing code and this specification.</li>
+<li><a href="verification-cases.md">Verification-case matrix</a>: acceptance and rejection scenarios for implementers.</li>
+<li><a href="vectors/encoding-vectors.json">Encoding vectors</a>: deterministic state-envelope and caboose examples.</li>
+<li><a href="vectors/verify_vectors.py">Vector verifier</a>: a Python-standard-library checker for bytes and hashes, not a Bitcoin Script validator.</li>
+</ul>
+<p>Complete identity-validation scripts, end-to-end transaction examples, script-size and cost measurements, and the new adversarial tests remain unimplemented. Neither the existing repository tests nor this package&#39;s encoding vectors establish that the new protocol has been securely implemented.</p>
+<p><a id="s18"></a></p>
+<h2>18. Open Research</h2>
+<ol>
+<li>Implement AUTH-1 through AUTH-5 in an actual OP_CAT execution environment and verify the entry conditions of the two-generation induction.</li>
+<li>Provide complete witness stack layouts, scalar-bound checks, and measured script resource usage.</li>
+<li>Instantiate M, Init, First, Step, auxiliary roles, and vault-fee policies for a concrete application. These are configuration extension points, not placeholders that may simply accept.</li>
+<li>Validate auxiliary-contract authentication and authorization for states before and after a transition.</li>
+<li>Evaluate R1&#39;s limits on funding preparation, withdrawal counts, and application proofs. Any extension needs a separate serialization or hashing design and tests.</li>
+<li>Specify state publication, recovery, and reorganization handling. Historical queries, if needed, require a separate proof protocol with authenticated anchors.</li>
+</ol>
+<p><a id="s19"></a></p>
+<h2>19. Copyright and Attribution</h2>
+<p>Attribution, the formal publication date, and licensing of this document and its new figures are to be determined by the proposal&#39;s rights holder. Referencing the repository does not place this document under that repository&#39;s license or alter rights in cited materials. Before formal submission, the author and license information must meet the submission requirements. <a href="https://github.com/bitcoin/bips/blob/master/bip-0003.md#bip-format-and-structure">BIP document structure</a></p>
+<p><a id="s20"></a></p>
+<h2>20. References and Version History</h2>
+<p>Underlying specifications: <a href="https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki">BIP 141</a>, <a href="https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki">BIP 340</a>, <a href="https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki">BIP 341</a>, <a href="https://github.com/bitcoin/bips/blob/master/bip-0342.mediawiki">BIP 342</a>, and <a href="https://github.com/bitcoin/bips/blob/master/bip-0347.mediawiki">BIP 347</a>. These documents define the underlying mechanisms; they do not endorse the protocol proposed here.</p>
+<p>Implementation background: <a href="https://github.com/Bitcoin-Wildlife-Sanctuary/covenants-gadgets/tree/93e057f2abdac14760b6a8ff82ee4a613a263153">pinned <code>covenants-gadgets</code> revision</a>. The CAT20 analogy in the original concept note is not used as a security argument or normative dependency.</p>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Date</th>
+<th>Changes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0.1.0</td>
+<td>2026-09-08</td>
+<td>Initial research draft: one main program, fixed state encoding, trailing caboose, complete commitments, genesis and continuation branches, two-generation backtracing, and the R1 resource profile</td>
+</tr>
+</tbody></table>
+</main><p class="endnote">v0.1.0 · 2026-09-08 · Figures are embedded. No external styles or scripts are required.</p></div></body></html>

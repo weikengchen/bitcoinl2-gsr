@@ -1,0 +1,8 @@
+flowchart LR
+  S[Canonical state envelope S] --> H[SHA256 / state_hash]
+  H --> W[OP_RETURN PUSHBYTES_36 / h concatenated with LE32 r]
+  R[Randomizer r] --> W
+  W --> C[P2WSH: OP_0 PUSHBYTES_32 SHA256 w]
+  C --> T[Same creating transaction T as the main-program output]
+  T --> ID[txid T]
+  ID --> X[Successor input 0 actually references txid T, 0]

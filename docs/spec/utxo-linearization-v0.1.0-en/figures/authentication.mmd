@@ -1,0 +1,12 @@
+flowchart TD
+  X[Authenticate complete fields of X and execution index 0] --> T[Reconstruct T / match txid referenced by input 0 of X]
+  T --> S[Authenticate caboose of T and old state S]
+  S --> Q[Reconstruct Q / match txid referenced by input 0 of T]
+  Q --> B{Actual script of output k of Q}
+  B -->|outside M| G[T has one input / S is GENESIS / enforce Init]
+  G --> G1[New state is ACTIVE / id = txid T / enforce First]
+  B -->|equals P| N[k = 0 / both states ACTIVE / preserve id / enforce Step]
+  B -->|in M but not P| E[Reject]
+  G1 --> V[Check new caboose, complete roles, and vault accounting]
+  N --> V
+  V --> A[Accept only if every requirement holds]

@@ -1,0 +1,10 @@
+flowchart LR
+  F[Approved ordinary funding] --> T0[T0 Genesis]
+  T0 --> U0[Output 0: P / vault B0]
+  T0 -. commits .-> C0[Trailing caboose: GENESIS / no id]
+  U0 -->|spend| T1[T1 First transition]
+  T1 --> U1[Output 0: P / vault B1]
+  T1 -. commits .-> C1[Trailing caboose: ACTIVE / id = txid T0]
+  U1 -->|spend| T2[T2 Continuation]
+  T2 --> U2[Output 0: P / vault B2]
+  T2 -. commits .-> C2[Trailing caboose: ACTIVE / preserve id]

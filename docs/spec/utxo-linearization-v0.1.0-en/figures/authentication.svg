@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="830" viewBox="0 0 1440 830" role="img" aria-labelledby="title desc">
+<title id="title">Two-generation backtrace: genesis or continuation?</title><desc id="desc">X references the main-program output of T. Input 0 of T references an output of Q. Authenticate Q to select genesis, continuation, or rejection.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#526777" /></marker></defs>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#20333d} .title{font-size:32px;font-weight:650} .sub{font-size:19px;fill:#59717e} .label{font-size:22px;font-weight:600} .body{font-size:20px} .small{font-size:17px;fill:#59717e} .mono{font-family:Menlo,Consolas,monospace;font-size:18px} .edge{fill:none;stroke:#526777;stroke-width:2.5;marker-end:url(#arrow)} </style>
+<rect width="1440" height="830" fill="#f8fafb" />
+<text x="64" y="54" class="title">Two-generation backtrace: genesis or continuation?</text>
+<text x="64" y="88" class="sub">Bind actual transactions and outpoints first; then inspect the predecessor script. Do not trust phase alone.</text>
+<rect x="64" y="137" width="388" height="173" rx="12" fill="#ffffff" stroke="#d2dde2" stroke-width="1.5" />
+<rect x="526" y="137" width="388" height="173" rx="12" fill="#ffffff" stroke="#d2dde2" stroke-width="1.5" />
+<rect x="988" y="137" width="388" height="173" rx="12" fill="#ffffff" stroke="#d2dde2" stroke-width="1.5" />
+<text x="88" y="176" class="label">Grandparent Q</text>
+<text x="88" y="214" class="body">output[k] = predecessor</text>
+<text x="88" y="250" class="body">Read its actual scriptPubKey</text>
+<text x="88" y="281" class="small">At genesis: funding preparation</text>
+<text x="550" y="176" class="label">Parent T</text>
+<text x="550" y="214" class="mono">input[0] → (txid(Q), k)</text>
+<text x="550" y="250" class="body">output[0] = P; state S at tail</text>
+<text x="1012" y="176" class="label">Current transaction X</text>
+<text x="1012" y="214" class="mono">input[0] → (txid(T), 0)</text>
+<text x="1012" y="250" class="body">output[0] = P; state S′ at tail</text>
+<polyline points="452,224 525,224" class="edge" />
+<polyline points="914,224 987,224" class="edge" />
+<rect x="470" y="369" width="500" height="80" rx="12" fill="#eaf1f4" stroke="#b5c9d3" stroke-width="1.5" />
+<text x="720" y="403" class="label" text-anchor="middle">Authenticated predecessor script?</text>
+<text x="720" y="431" class="small" text-anchor="middle">Read Q.output[k].scriptPubKey</text>
+<polyline points="258,310 258,341 720,341 720,368" class="edge" />
+<polyline points="585,449 585,487 258,487 258,533" class="edge" />
+<polyline points="720,449 720,533" class="edge" />
+<polyline points="855,449 855,487 1182,487 1182,533" class="edge" />
+<rect x="64" y="534" width="388" height="172" rx="12" fill="#eef2fb" stroke="#afbfdc" stroke-width="1.5" />
+<rect x="526" y="534" width="388" height="172" rx="12" fill="#edf6f3" stroke="#9ebfaf" stroke-width="1.5" />
+<rect x="988" y="534" width="388" height="172" rx="12" fill="#f8eeee" stroke="#d7baba" stroke-width="1.5" />
+<text x="88" y="574" class="label">Outside M · Genesis</text>
+<text x="88" y="613" class="body">One input in T; S is GENESIS</text>
+<text x="88" y="652" class="body">S′ ACTIVE; id = txid(T)</text>
+<text x="88" y="682" class="small">Also enforce Init and First</text>
+<text x="550" y="574" class="label">Equal to P · Continuation</text>
+<text x="550" y="613" class="body">k = 0; S and S′ are ACTIVE</text>
+<text x="550" y="652" class="mono">S′.id = S.id</text>
+<text x="550" y="682" class="small">Also enforce Step and accounting</text>
+<text x="1012" y="574" class="label">In M, but not equal to P</text>
+<text x="1012" y="624" class="title">Reject</text>
+<text x="1012" y="674" class="small">Script migration is not supported</text>
+<text x="64" y="765" class="sub">Premise: T validly spent P, and every P spending path enforces the same identity checks.</text>
+<text x="64" y="797" class="small">Backtrace depth is bounded; transaction size, state proofs, and execution cost remain resource-limited.</text>
+</svg>

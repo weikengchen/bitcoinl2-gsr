@@ -1,0 +1,4 @@
+target/
+# local reference material (sources and pinned commits are listed in docs/dev-plan.md)
+docs/ref/
+.DS_Store

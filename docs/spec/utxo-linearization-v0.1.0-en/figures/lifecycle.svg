@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="680" viewBox="0 0 1440 680" role="img" aria-labelledby="title desc">
+<title id="title">Main-program lineage and the trailing caboose</title><desc id="desc">T0 has no state id. T1 writes the genesis txid. T2 preserves it. Only the main-program outputs are consumed; old cabooses are not.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#526777" /></marker></defs>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#20333d} .title{font-size:32px;font-weight:650} .sub{font-size:19px;fill:#59717e} .label{font-size:22px;font-weight:600} .body{font-size:20px} .small{font-size:17px;fill:#59717e} .mono{font-family:Menlo,Consolas,monospace;font-size:18px} .edge{fill:none;stroke:#526777;stroke-width:2.5;marker-end:url(#arrow)} </style>
+<rect width="1440" height="680" fill="#f8fafb" />
+<text x="64" y="54" class="title">Main-program lineage and the trailing caboose</text>
+<text x="64" y="88" class="sub">Each transaction has one main-program output holding the vault and a designated caboose committing to state.</text>
+<rect x="64" y="122" width="368" height="474" rx="12" fill="#ffffff" stroke="#d2dde2" stroke-width="1.5" />
+<rect x="64" y="122" width="368" height="62" rx="12" fill="#eaf1f4" stroke="#d2dde2" stroke-width="1.5" />
+<text x="88" y="161" class="label">T0 · Genesis</text>
+<text x="88" y="222" class="label">Input 0</text>
+<text x="88" y="256" class="body">Approved ordinary funding</text>
+<rect x="84" y="294" width="328" height="98" rx="12" fill="#edf6f3" stroke="#9ebfaf" stroke-width="1.5" />
+<text x="102" y="331" class="label">Output 0 · Main program P</text>
+<text x="102" y="369" class="mono">vault = B0</text>
+<text x="88" y="432" class="small">Middle outputs: constrained roles</text>
+<rect x="84" y="458" width="328" height="114" rx="12" fill="#eef2fb" stroke="#afbfdc" stroke-width="1.5" />
+<text x="102" y="495" class="label">Last output · Caboose</text>
+<text x="102" y="529" class="body">GENESIS · No id yet</text>
+<text x="102" y="553" class="small">S0 includes the application root</text>
+<rect x="536" y="122" width="368" height="474" rx="12" fill="#ffffff" stroke="#d2dde2" stroke-width="1.5" />
+<rect x="536" y="122" width="368" height="62" rx="12" fill="#eaf1f4" stroke="#d2dde2" stroke-width="1.5" />
+<text x="560" y="161" class="label">T1 · First transition</text>
+<text x="560" y="222" class="label">Input 0</text>
+<text x="560" y="256" class="body">Spend U0 = (txid(T0), 0)</text>
+<rect x="556" y="294" width="328" height="98" rx="12" fill="#edf6f3" stroke="#9ebfaf" stroke-width="1.5" />
+<text x="574" y="331" class="label">Output 0 · Main program P</text>
+<text x="574" y="369" class="mono">vault = B1</text>
+<text x="560" y="432" class="small">Middle outputs: constrained roles</text>
+<rect x="556" y="458" width="328" height="114" rx="12" fill="#eef2fb" stroke="#afbfdc" stroke-width="1.5" />
+<text x="574" y="495" class="label">Last output · Caboose</text>
+<text x="574" y="529" class="body">ACTIVE · id = txid(T0)</text>
+<text x="574" y="553" class="small">S1 includes the application root</text>
+<rect x="1008" y="122" width="368" height="474" rx="12" fill="#ffffff" stroke="#d2dde2" stroke-width="1.5" />
+<rect x="1008" y="122" width="368" height="62" rx="12" fill="#eaf1f4" stroke="#d2dde2" stroke-width="1.5" />
+<text x="1032" y="161" class="label">T2 · Continuation</text>
+<text x="1032" y="222" class="label">Input 0</text>
+<text x="1032" y="256" class="body">Spend U1 = (txid(T1), 0)</text>
+<rect x="1028" y="294" width="328" height="98" rx="12" fill="#edf6f3" stroke="#9ebfaf" stroke-width="1.5" />
+<text x="1046" y="331" class="label">Output 0 · Main program P</text>
+<text x="1046" y="369" class="mono">vault = B2</text>
+<text x="1032" y="432" class="small">Middle outputs: constrained roles</text>
+<rect x="1028" y="458" width="328" height="114" rx="12" fill="#eef2fb" stroke="#afbfdc" stroke-width="1.5" />
+<text x="1046" y="495" class="label">Last output · Caboose</text>
+<text x="1046" y="529" class="body">ACTIVE · id = txid(T0)</text>
+<text x="1046" y="553" class="small">S2 includes the application root</text>
+<polyline points="432,343 475,343 475,235 535,235" class="edge" />
+<polyline points="904,343 947,343 947,235 1007,235" class="edge" />
+<text x="474" y="377" class="small" text-anchor="middle">Spend</text>
+<text x="946" y="377" class="small" text-anchor="middle">Spend</text>
+<text x="64" y="646" class="sub">Old cabooses are not spent. Only main-program outputs form the continuous lineage.</text>
+</svg>
