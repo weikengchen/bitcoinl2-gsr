@@ -221,20 +221,18 @@ impl Line {
     }
 }
 
-/// One deposit transaction paying each of `values` to `a`, each a output followed
-/// by its recipient OP_RETURN. Returns the a outputs.
+/// One deposit per value, each its own transaction in the deposit format
+/// (recipient `[i + 1; 32]`). Returns the a outputs.
 pub fn deposit(w: &mut World, a: &ProgramA, values: &[u64]) -> Vec<(OutPoint, TxOut)> {
-    let (coin, prevout) = w.fee_coin();
-    let mut output = vec![];
+    let mut out = vec![];
     for (i, v) in values.iter().enumerate() {
-        output.extend(a.deposit_outputs(Amount::from_sat(*v), &[i as u8 + 1; 20]));
+        let (coin, prevout) = w.fee_coin();
+        let change = w.wallet.out(prevout.value.to_sat() - v - 1_000);
+        let mut d = a.deposit_tx(&[coin], Amount::from_sat(*v), &[i as u8 + 1; 32], Some(change));
+        w.wallet.sign(&mut d, 0, &prevout);
+        w.db.verify_transaction(&d).unwrap();
+        w.db.insert_transaction_unconditionally(&d).unwrap();
+        out.push((OutPoint::new(d.compute_txid(), 0), d.output[0].clone()));
     }
-    let total: u64 = values.iter().sum();
-    output.push(w.wallet.out(prevout.value.to_sat() - total - 1_000));
-    let mut d = Transaction { version: Version::TWO, lock_time: LockTime::ZERO, input: vec![input(coin)], output };
-    w.wallet.sign(&mut d, 0, &prevout);
-    w.db.verify_transaction(&d).unwrap();
-    w.db.insert_transaction_unconditionally(&d).unwrap();
-    let txid = d.compute_txid();
-    (0..values.len()).map(|i| (OutPoint::new(txid, 2 * i as u32), d.output[2 * i].clone())).collect()
+    out
 }

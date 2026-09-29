@@ -5,12 +5,13 @@
 mod common;
 
 use bitcoin::absolute::LockTime;
+use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut};
+use bitcoin::{Amount, OutPoint, ScriptBuf, ScriptHash, Transaction, TxOut};
 use bitcoin_simulator::spending_requirements::P2TRChecker;
-use bitcoinl2_vault::program_a::{AShape, ProgramA, MAX_A_INPUTS};
+use bitcoinl2_vault::program_a::{AShape, Deposit, ProgramA, Source, MAX_A_INPUTS, MAX_DEPOSIT_INPUTS};
 use bitcoinl2_vault::state::{caboose, Phase, State};
-use bitcoinl2_vault::tx::{input, Vault};
+use bitcoinl2_vault::tx::{input, op_return, Vault};
 use common::{aggregator_out, deposit, rejects, Line, World, AGGREGATOR};
 
 /// Merge `inputs` with `a` and accept it; returns the new a output.
@@ -254,4 +255,67 @@ fn a_leaves_have_no_op_success() {
     for s in &a.tree.scripts {
         gsr_gadgets::leaf::assert_no_op_success(s).unwrap();
     }
+}
+
+/// A merge's change and fee input are native segwit: the change cannot carry
+/// the deposit tag (which would pass the merged total off as a deposit to
+/// whoever the tag names), and the fee input cannot bring a scriptSig.
+#[test]
+fn merge_change_and_fee_are_native_segwit() {
+    let mut w = World::new(0);
+    let line = Line::new(&mut w);
+    let a = &line.a;
+    let d = deposit(&mut w, a, &[10_000, 20_000]);
+
+    let fee = w.fee_coin();
+    let (ok, _) = merge_edited(&mut w, &[a], &d, fee, |_| {});
+    w.db.verify_transaction(&ok).unwrap();
+
+    let tag = a.deposit_outputs(Amount::ZERO, &[0xee; 32])[1].script_pubkey.clone();
+    let fee = w.fee_coin();
+    let (tx, prevouts) = merge_edited(&mut w, &[a], &d, fee, |tx| tx.output[1].script_pubkey = tag.clone());
+    rejects(&tx, &prevouts, 0, "Verify");
+
+    let (coin, mut p2sh) = w.fee_coin();
+    p2sh.script_pubkey = ScriptBuf::new_p2sh(&ScriptHash::from_byte_array([7; 20]));
+    let (tx, prevouts) = merge_edited(&mut w, &[a], &d, (coin, p2sh), |_| {});
+    rejects(&tx, &prevouts, 0, "Verify");
+}
+
+/// The deposit format, and how a tracer tells a deposit from a merge.
+#[test]
+fn deposit_format_and_classification() {
+    let mut w = World::new(0);
+    let line = Line::new(&mut w);
+    let a = &line.a;
+    let (coin, _) = w.fee_coin();
+    let r = [0x42; 32];
+    let change = w.wallet.out(50_000);
+    let ok = a.deposit_tx(&[coin], Amount::from_sat(10_000), &r, Some(change.clone()));
+    let dep = Deposit { amount: Amount::from_sat(10_000), recipient: r };
+    assert_eq!(a.deposit_of(&ok), Some(dep));
+    assert_eq!(a.classify(&ok, 0), Source::Deposit(dep));
+    assert_eq!(a.classify(&ok, 2), Source::Unattributed); // only output 0 is the deposit
+    assert_eq!(a.deposit_of(&a.deposit_tx(&[coin; 8], Amount::from_sat(10_000), &r, None)), Some(dep));
+
+    let edits: Vec<Box<dyn Fn(&mut Transaction)>> = vec![
+        Box::new(|tx| tx.output.push(change.clone())),                         // a fourth output
+        Box::new(|tx| tx.output[2] = op_return(vec![1])),                      // change not native segwit
+        Box::new(|tx| tx.output[0].script_pubkey = change.script_pubkey.clone()), // output 0 is not a_L
+        Box::new(|tx| tx.output[1] = op_return(vec![0; 36])),                  // no tag
+        Box::new(|tx| tx.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51])), // a scriptSig
+        Box::new(|tx| tx.input = vec![tx.input[0].clone(); MAX_DEPOSIT_INPUTS + 1]), // too many inputs
+    ];
+    for edit in edits {
+        let mut tx = ok.clone();
+        edit(&mut tx);
+        assert_eq!(a.deposit_of(&tx), None);
+        assert_eq!(a.classify(&tx, 0), Source::Unattributed);
+    }
+
+    // a merge in the merge template, with its a inputs to trace next
+    let d = deposit(&mut w, a, &[10_000, 20_000, 30_000]);
+    let fee = w.fee_coin();
+    let (m, _) = merge_edited(&mut w, &[a], &d, fee, |_| {});
+    assert_eq!(a.classify(&m, 0), Source::Merge(3));
 }
