@@ -2,17 +2,15 @@
 
 use crate::da::chain_hash;
 use crate::leaf::{vault_leaf, Kind, VaultConfig, SEQUENCE};
+use crate::verifier::Franker;
 use crate::state::{caboose, sha256, AppState, Lock, Mode, Params, Phase, State};
 use anyhow::{bail, Result};
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
-use bitcoin::key::Keypair;
 use bitcoin::script::PushBytesBuf;
-use bitcoin::secp256k1::{Message, Secp256k1};
-use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TapLeafHash, Transaction, TxIn, TxOut, Witness};
+use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use gsr_gadgets::leaf::V2Tree;
 use gsr_gadgets::parse::tx_blob;
 use gsr_gadgets::schnorr::schnorr_trick_hints;
@@ -34,7 +32,7 @@ pub fn op_return(data: Vec<u8>) -> TxOut {
 }
 
 /// Hint bytes of a vault transaction, in the leaf's consumption order after the
-/// SIGHASH_ALL and Schnorr-trick hints. A completion's operator signature is
+/// SIGHASH_ALL and Schnorr-trick hints. A completion's franking is
 /// added when building (it signs the final transaction).
 #[derive(Clone, Debug)]
 pub struct TransitionHints {
@@ -253,21 +251,18 @@ impl Vault {
     }
 
     /// The vault input's witness for `tx`, or `None` if the Schnorr trick needs a
-    /// new `r`. A completion carries the signature of `operator`.
-    pub fn vault_witness(&self, plan: &Plan, tx: &Transaction, operator: Option<&Keypair>) -> Option<Witness> {
+    /// new `r`. A completion carries its franking (the placeholder proof).
+    pub fn vault_witness(&self, plan: &Plan, tx: &Transaction, franking: Option<Vec<u8>>) -> Option<Witness> {
         let leaf = self.leaf_index(plan.kind);
-        let leaf_hash = self.tree.leaf_hash(leaf);
         let prevouts = Self::prevouts(plan);
-        let data = SighashAllData::new(tx, &prevouts, 0, leaf_hash);
+        let data = SighashAllData::new(tx, &prevouts, 0, self.tree.leaf_hash(leaf));
         let trick = schnorr_trick_hints(&data.preimage()).ok()?;
         let h = &plan.hints;
         let mut hints = data.hints();
         hints.extend(trick);
         hints.extend([h.parent.clone(), h.old_state.clone(), h.old_app.clone()]);
         hints.extend(h.extra.iter().cloned());
-        if let Some(key) = operator {
-            hints.push(operator_signature(tx, &prevouts, leaf_hash, key));
-        }
+        hints.extend(franking);
         hints.push(h.grandparent.clone());
         Some(self.tree.witness(leaf, &hints))
     }
@@ -281,47 +276,47 @@ impl Vault {
         plan: &Plan,
         deposit_witness: impl Fn(&Transaction, usize) -> Option<Witness>,
     ) -> Transaction {
-        self.build_inner(plan, deposit_witness, None)
+        self.build_inner(plan, deposit_witness, |_| Ok(None)).expect("nothing to frank")
     }
 
     /// Build a transaction without deposit inputs (see [Vault::build_with]).
     pub fn build(&self, plan: &Plan) -> Transaction {
         assert!(plan.deposits.is_empty(), "use build_with for folds");
-        self.build_inner(plan, |_, _| None, None)
+        self.build_with(plan, |_, _| None)
     }
 
-    /// Build a completion; `operator`'s signature stands in for the proof.
-    pub fn build_complete(&self, plan: &Plan, operator: &Keypair) -> Transaction {
-        self.build_inner(plan, |_, _| None, Some(operator))
+    /// Build a completion franked by `franker`, the placeholder for the proof
+    /// verifier. Fails if the franker refuses the batch.
+    pub fn build_complete(&self, plan: &Plan, franker: &Franker) -> Result<Transaction> {
+        self.build_complete_with(plan, |tx| franker.frank(self, plan, tx))
+    }
+
+    /// Build a completion whose franking is `frank(tx)`.
+    pub fn build_complete_with(&self, plan: &Plan, frank: impl Fn(&Transaction) -> Result<Vec<u8>>) -> Result<Transaction> {
+        self.build_inner(plan, |_, _| None, |tx| frank(tx).map(Some))
     }
 
     fn build_inner(
         &self,
         plan: &Plan,
         deposit_witness: impl Fn(&Transaction, usize) -> Option<Witness>,
-        operator: Option<&Keypair>,
-    ) -> Transaction {
+        frank: impl Fn(&Transaction) -> Result<Option<Vec<u8>>>,
+    ) -> Result<Transaction> {
         for r in 0u32.. {
             let mut tx = self.unsigned(plan, r);
-            let Some(w) = self.vault_witness(plan, &tx, operator) else { continue };
+            let Some(mut w) = self.vault_witness(plan, &tx, None) else { continue };
             let deposits: Option<Vec<Witness>> =
                 (1..=plan.deposits.len()).map(|i| deposit_witness(&tx, i)).collect();
             let Some(deposits) = deposits else { continue };
+            if let Some(franking) = frank(&tx)? {
+                w = self.vault_witness(plan, &tx, Some(franking)).expect("the trick applies");
+            }
             tx.input[0].witness = w;
             for (i, dw) in deposits.into_iter().enumerate() {
                 tx.input[1 + i].witness = dw;
             }
-            return tx;
+            return Ok(tx);
         }
         unreachable!()
     }
-}
-
-/// BIP 340 signature (SIGHASH_DEFAULT) of input 0 of `tx` spending the leaf `leaf_hash`.
-fn operator_signature(tx: &Transaction, prevouts: &[TxOut], leaf_hash: TapLeafHash, key: &Keypair) -> Vec<u8> {
-    let sighash = SighashCache::new(tx)
-        .taproot_script_spend_signature_hash(0, &Prevouts::All(prevouts), leaf_hash, TapSighashType::Default)
-        .expect("sighash");
-    let msg = Message::from_digest(sighash.to_byte_array());
-    Secp256k1::new().sign_schnorr_no_aux_rand(&msg, key).as_ref().to_vec()
 }

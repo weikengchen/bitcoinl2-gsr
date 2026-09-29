@@ -115,6 +115,7 @@ fn split_sizes() {
         ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array(h))
     };
     let payouts: Vec<TxOut> = (0..256).map(|i| TxOut { value: Amount::from_sat(330), script_pubkey: spk(i) }).collect();
+    w.franker.fan_out = 16;
     let t = SplitTree::new(&payouts, 16, FEE, &w.b.script_pubkey());
     let x = complete(&mut w, &t, &da(&payouts));
     let mut paid = vec![];

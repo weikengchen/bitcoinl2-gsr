@@ -1,5 +1,5 @@
 //! Locking the vault for a withdrawal proof, completing, and timing out
-//! (design §7, §8.4). The proof is a placeholder: the operator signs the
+//! (design §7, §8.4). The proof is a placeholder: the franker signs the
 //! completion. A rejected case runs the vault input on its own and checks the
 //! failing rule; each has an honest control.
 
@@ -7,10 +7,12 @@ mod common;
 
 use bitcoin::key::Keypair;
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{Amount, ScriptBuf, TxOut};
+use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
 use bitcoinl2_vault::state::{AppState, Lock, Mode, Params};
-use bitcoinl2_vault::da::{Change, DaData};
+use bitcoinl2_vault::da::{chain_hash, Change, DaData};
+use bitcoinl2_vault::program_b::SplitTree;
 use bitcoinl2_vault::tx::{Batch, Plan, Vault};
+use bitcoinl2_vault::verifier::{Franker, Statement};
 use common::{deposit, rejects, Line, World};
 
 /// Lock height (the lock transaction's nLockTime).
@@ -23,9 +25,10 @@ fn refund(w: &World) -> ScriptBuf {
     w.wallet.spk()
 }
 
-/// A proven batch: 5,000 sats to program b (a stand-in split root), DA data
-/// with two withdrawals and three changed accounts, a new L2 state root.
-fn batch() -> Batch {
+/// A proven batch: DA data with two withdrawals and three changed accounts,
+/// the split tree of the withdrawals (one split of 2,000 + 2,500 sats plus
+/// the 500-sat split fee), and a new L2 state root.
+fn batch(w: &World) -> Batch {
     let payout = |sats| TxOut { value: Amount::from_sat(sats), script_pubkey: ScriptBuf::from_bytes(vec![0x51]) };
     let da = DaData {
         withdrawals: vec![payout(2_000), payout(2_500)],
@@ -36,7 +39,16 @@ fn batch() -> Batch {
             Change { index: 6, balance: 1_000, nonce: 0 },
         ],
     };
-    Batch { amount: Amount::from_sat(5_000), root: [0x52; 32], da: da.encode(), l2_root: [0x5f; 32], params: new_params() }
+    let tree = SplitTree::from_da(&da, w.franker.fan_out, w.franker.split_fee, &w.b.script_pubkey());
+    assert_eq!(tree.root().value, Amount::from_sat(5_000));
+    Batch { amount: tree.root().value, root: tree.root().root(), da: da.encode(), l2_root: [0x5f; 32], params: new_params() }
+}
+
+/// A completion franked without the franker's checks, with its fee input signed.
+fn careless(w: &World, p: &Plan) -> Transaction {
+    let mut x = w.vault.build_complete_with(p, |tx| w.franker.sign(&w.vault, p, tx)).unwrap();
+    w.wallet.sign(&mut x, 1, &p.fee_prevout);
+    x
 }
 
 fn new_params() -> Params {
@@ -68,7 +80,7 @@ fn locked(w: &mut World) -> Line {
 fn complete_plan(w: &mut World, line: &Line) -> Plan {
     let p = line.plan(w, vec![]);
     let refund = refund(w);
-    w.vault.complete(p, &batch(), refund)
+    w.vault.complete(p, &batch(w), refund)
 }
 
 /// Lock, complete (withdraw, refund the bond, new parameters), and carry on.
@@ -92,7 +104,7 @@ fn lock_then_complete() {
     assert_eq!(x.output[4], TxOut { value: Amount::from_sat(BOND), script_pubkey: refund(&w) });
     assert_eq!(line.app.mode, Mode::Normal);
     assert_eq!(line.app.params, new_params());
-    assert_eq!(line.app.l2_root, batch().l2_root);
+    assert_eq!(line.app.l2_root, batch(&w).l2_root);
 
     // the vault carries on: a fold, then a lock under the new B_min
     let d = deposit(&mut w, &line.a, &[10_000]);
@@ -164,8 +176,8 @@ fn locked_vault_is_frozen() {
     let mut p = normal.plan(&mut w, vec![]);
     let fake = Lock { height: H, bond: 1_000, locker: LOCKER, refund_hash: [0; 32] };
     p.set_app(AppState { mode: Mode::Verifying(fake), ..p.new_app });
-    let p = w.vault.complete(p, &batch(), refund(&w));
-    let tx = Line::build(&w, &normal.a, &p);
+    let p = w.vault.complete(p, &batch(&w), refund(&w));
+    let tx = careless(&w, &p);
     rejects(&tx, &Vault::prevouts(&p), 0, "NumEqualVerify");
 }
 
@@ -182,10 +194,10 @@ fn complete_rules() {
     let ok = complete_plan(&mut w, &line);
     w.db.verify_transaction(&Line::build(&w, &line.a, &ok)).unwrap();
 
-    // only the operator's signature stands in for the proof
-    let other = Keypair::from_seckey_slice(&Secp256k1::new(), &[8; 32]).unwrap();
+    // only the franker's signature stands in for the proof
+    let other = Franker { key: Keypair::from_seckey_slice(&Secp256k1::new(), &[8; 32]).unwrap(), ..w.franker.clone() };
     let tx = {
-        let mut x = w.vault.build_complete(&ok, &other);
+        let mut x = w.vault.build_complete(&ok, &other).unwrap();
         w.wallet.sign(&mut x, 1, &ok.fee_prevout);
         x
     };
@@ -195,9 +207,11 @@ fn complete_rules() {
     p.extra_outputs[0].script_pubkey = w.wallet.spk();
     check(&w, &p, "EqualVerify");
     // the published DA data is the one the OP_RETURN commits to
+    // (the franker refuses such a batch, so sign without its checks)
     let mut p = complete_plan(&mut w, &line);
     p.hints.extra[1] = vec![0x58; 3 * 43];
-    check(&w, &p, "EqualVerify");
+    assert!(w.vault.build_complete(&p, &w.franker).is_err());
+    rejects(&careless(&w, &p), &Vault::prevouts(&p), 0, "EqualVerify");
     // the vault pays out exactly W + bond
     let mut p = complete_plan(&mut w, &line);
     p.successor.value -= Amount::from_sat(1);
@@ -208,7 +222,7 @@ fn complete_rules() {
     check(&w, &p, "EqualVerify");
     // ... to the recorded refund address
     let p = line.plan(&mut w, vec![]);
-    let p = w.vault.complete(p, &batch(), w.b.script_pubkey());
+    let p = w.vault.complete(p, &batch(&w), w.b.script_pubkey());
     check(&w, &p, "EqualVerify");
 }
 
@@ -225,7 +239,7 @@ fn refund_to_the_vault_is_rejected() {
     line.accept(&w, &p);
 
     let p = line.plan(&mut w, vec![]);
-    let p = w.vault.complete(p, &batch(), vault_spk);
+    let p = w.vault.complete(p, &batch(&w), vault_spk);
     let tx = Line::build(&w, &line.a, &p);
     rejects(&tx, &Vault::prevouts(&p), 0, "Verify");
 
@@ -288,4 +302,39 @@ fn timeout() {
     line.accept(&w, &p);
     let p = complete_plan(&mut w, &line);
     line.accept(&w, &p);
+}
+
+/// The placeholder verifier: the statement is read off the completion, and the
+/// franker refuses batches whose R or W do not come from the published
+/// withdrawal list, or whose DA data is malformed.
+#[test]
+fn franker_checks_the_statement() {
+    let mut w = World::new(0);
+    let line = locked(&mut w);
+
+    let p = complete_plan(&mut w, &line);
+    let x = w.vault.build_complete(&p, &w.franker).unwrap();
+    let stmt = Statement::of_completion(&p, &x).unwrap();
+    let b = batch(&w);
+    assert_eq!(stmt.vault_id, line.id);
+    assert_eq!(stmt.acc, p.new_app.acc);
+    assert_eq!(stmt.l2_root, World::app0().l2_root);
+    assert_eq!((stmt.new_l2_root, stmt.new_params), (b.l2_root, b.params));
+    assert_eq!((stmt.amount, stmt.split_root, stmt.da_hash), (b.amount, b.root, chain_hash(&[&b.da])));
+    assert_eq!(stmt.encode().len(), 212);
+
+    let refuse = |w: &mut World, b: Batch, why: &str| {
+        let p = line.plan(w, vec![]);
+        let p = w.vault.complete(p, &b, refund(w));
+        let e = w.vault.build_complete(&p, &w.franker).unwrap_err().to_string();
+        assert!(e.contains(why), "{e}");
+    };
+    let wrong_root = Batch { root: [0x52; 32], ..batch(&w) };
+    refuse(&mut w, wrong_root, "R is not");
+    let wrong_amount = Batch { amount: Amount::from_sat(5_001), ..batch(&w) };
+    refuse(&mut w, wrong_amount, "W is not");
+    let mut da = batch(&w).da;
+    da.push(0);
+    let malformed = Batch { da, ..batch(&w) };
+    refuse(&mut w, malformed, "trailing bytes");
 }

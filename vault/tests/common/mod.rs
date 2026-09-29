@@ -15,6 +15,7 @@ use bitcoinl2_vault::program_a::ProgramA;
 use bitcoinl2_vault::program_b::ProgramB;
 use bitcoinl2_vault::state::{AppState, Mode, Params, State};
 use bitcoinl2_vault::tx::{input, op_return, Plan, Vault};
+use bitcoinl2_vault::verifier::Franker;
 
 pub struct Wallet {
     pub sk: SecretKey,
@@ -45,12 +46,12 @@ impl Wallet {
 
 /// A funded world. `f` has 8 wallet outputs (within the parser bounds, so it can be
 /// the grandparent of a first transition); `fees` pays the fee inputs.
-/// `operator` signs completions (the proof placeholder); `b` is program b.
+/// `franker` franks completions (the proof placeholder); `b` is program b.
 pub struct World {
     pub db: Database,
     pub vault: Vault,
     pub wallet: Wallet,
-    pub operator: Keypair,
+    pub franker: Franker,
     pub b: ProgramB,
     pub f: Transaction,
     pub fees: Transaction,
@@ -72,11 +73,16 @@ impl World {
         let db = Database::connect_temporary_database().unwrap();
         db.insert_transaction_unconditionally(&f).unwrap();
         db.insert_transaction_unconditionally(&fees).unwrap();
-        let operator = Keypair::from_seckey_slice(&Secp256k1::new(), &[6; 32]).unwrap();
         let b = ProgramB::new().unwrap();
-        let config = VaultConfig { operator: operator.x_only_public_key().0, b_spk: b.script_pubkey() };
+        let franker = Franker {
+            key: Keypair::from_seckey_slice(&Secp256k1::new(), &[6; 32]).unwrap(),
+            fan_out: 4,
+            split_fee: Amount::from_sat(500),
+            b_spk: b.script_pubkey(),
+        };
+        let config = VaultConfig { franker: franker.public_key(), b_spk: b.script_pubkey() };
         let vault = Vault::new(config).unwrap();
-        Self { db, vault, wallet, operator, b, f, fees, next_f: 0, next_fee: 0 }
+        Self { db, vault, wallet, franker, b, f, fees, next_f: 0, next_fee: 0 }
     }
 
     /// The next unused output of `f`.
@@ -191,12 +197,12 @@ impl Line {
         }
     }
 
-    /// `plan` with `a` signing the deposit inputs, the operator a completion,
+    /// `plan` with `a` signing the deposit inputs, the franker a completion,
     /// and the wallet the fee input.
     pub fn build(w: &World, a: &ProgramA, plan: &Plan) -> Transaction {
         let mut x = match plan.kind {
             Kind::Fold(_) => a.fold_tx(&w.vault, plan),
-            Kind::Complete => w.vault.build_complete(plan, &w.operator),
+            Kind::Complete => w.vault.build_complete(plan, &w.franker).expect("the franker accepts the batch"),
             _ => w.vault.build(plan),
         };
         let fee = x.input.len() - 1;

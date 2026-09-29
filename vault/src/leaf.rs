@@ -180,8 +180,9 @@ impl Kind {
 /// What the vault's scripts bake in besides the protocol.
 #[derive(Clone, Debug)]
 pub struct VaultConfig {
-    /// Placeholder for the withdrawal proof verifier: this key signs completions.
-    pub operator: XOnlyPublicKey,
+    /// Placeholder for the withdrawal proof verifier: the franker's key, which
+    /// signs a completion after checking its statement off chain ([crate::verifier]).
+    pub franker: XOnlyPublicKey,
     /// scriptPubKey of program b, which receives the withdrawals.
     pub b_spk: ScriptBuf,
 }
@@ -191,7 +192,7 @@ pub struct VaultConfig {
 /// Hints, in order: SIGHASH_ALL data of the transaction, the two Schnorr-trick
 /// hints, the parent T, the old state S, the old application state A, the
 /// kind's own hints (a lock: its data; a completion: the new L2 state root and
-/// parameters, the DA data and the operator's signature), and the grandparent Q.
+/// parameters, the DA data and the franking), and the grandparent Q.
 /// The new state is not a hint: the leaf builds it and checks that the caboose
 /// commits to it.
 pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
@@ -376,9 +377,10 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
             s.apply(ops(&[OP_CAT, OP_SHA256]), 2, &["_h"]);
             s.pick("da_hash", "_x");
             s.apply(op(OP_EQUALVERIFY), 2, &[]);
-            // Placeholder for the proof verifier: the operator signs this transaction.
+            // Placeholder for the proof verifier: the franker's signature over this
+            // transaction, given after it checked the statement off chain.
             s.gadget(OP_HINT(), 0, &["sig"]);
-            s.push_data(&cfg.operator.serialize(), "_k");
+            s.push_data(&cfg.franker.serialize(), "_k");
             s.apply(op(OP_CHECKSIGVERIFY), 2, &[]);
             // new amount + W + bond == old amount
             substr(&mut s, "A", off::BOND, 8, "bond");

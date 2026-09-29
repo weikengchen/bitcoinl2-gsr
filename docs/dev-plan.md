@@ -216,6 +216,23 @@
 - **暂未做**：
   - 分块公布（哈希链的格式已经预留）；
   - L2 状态树本身，也就是 Merkle 树的具体定义和 l2_root 的计算。vault 只把 l2_root 当作证明给出的值。
+    - 用户决定（2026-09-28）：L2 抽象化，不做。
+
+### P5d 验证器接口与 franking 占位 —— 完成（2026-09-28）
+
+- **设计**：见 design §7 第 6 条。
+  - 语句 212 字节；
+  - franker 先在链下检查（DA 规范且与 H 一致，R、W 是提款清单的拆分树），通过后用 SIGHASH_DEFAULT 对整笔完成交易签名。
+- **代码**：
+  - `vault/src/verifier.rs`：
+    - `Statement`：定义、编码，以及 `of_completion` 从完成交易读出语句；
+    - `Franker`：`check` 做链下检查，`frank` = 检查 + 签名；`sign` 不做检查，只给链上规则的测试用。
+  - `VaultConfig.operator` 改名为 `franker`；`build_complete` 改为调用 franker，franker 拒绝时返回错误；另有 `build_complete_with`，可以自定义签名方式。
+- **测试**：
+  - 语句的各个字段与完成交易一致，长度 212 字节；
+  - franker 拒绝三种批次：R 不对、W 不对、DA 数据格式错误；
+  - 原有的链上反例改为：franker 会接受的就正常签名；franker 会拒绝的（DA 不一致、未锁定就完成）绕过它签名，以便单独测链上规则。
+- **全部测试**：workspace 共 57 项，全部通过。
 
 ### P6 在真实实现上对照验证（已取消，2026-09-28）
 
