@@ -189,3 +189,38 @@ fn varops_budget_is_shared_by_inputs() {
     assert!(ok.weight().to_wu() * 10_000 > 42_400_000);
     db.verify_transaction(&ok).unwrap();
 }
+
+/// OP_TX (0xbd): a leaf that requires output 0 to pay exactly 1,000 sats to a
+/// given script; a future selector version makes the leaf succeed at once.
+#[test]
+fn op_tx_covenant() {
+    let db = Database::connect_temporary_database().unwrap();
+    let target = ScriptBuf::new_op_return([0x42; 4]);
+    // output 0 (SINGLE scope, operand 0 below the selector): amount, scriptPubKey
+    let selector = [0x00, 0x00, 0x00, 0x03, 0x00, 0x03];
+    let covenant = leaf(
+        Builder::new()
+            .push_opcode(OP_PUSHBYTES_0)
+            .push_slice(selector)
+            .push_opcode(OP_RETURN_189) // OP_TX
+            .push_slice(PushBytesBuf::try_from(target.to_bytes()).unwrap())
+            .push_opcode(OP_EQUALVERIFY)
+            .push_slice([0xe8, 0x03]) // 1,000
+            .push_opcode(OP_EQUAL)
+            .into_script(),
+    );
+    let (o, _) = fund(&db, &covenant.spk, 5_000);
+    let mut ok = spend(&[o]);
+    ok.input[0].witness = witness(&[], &covenant);
+    db.verify_transaction(&ok).unwrap();
+    let mut bad = ok.clone();
+    bad.output[0].value = Amount::from_sat(999);
+    assert!(db.verify_transaction(&bad).unwrap_err().to_string().contains("EvalFalse"));
+
+    // selector version 1: validation succeeds whatever follows
+    let future = leaf(Builder::new().push_opcode(OP_PUSHNUM_1).push_opcode(OP_RETURN_189).push_opcode(OP_RETURN).into_script());
+    let (o, _) = fund(&db, &future.spk, 5_001);
+    let mut tx = spend(&[o]);
+    tx.input[0].witness = witness(&[], &future);
+    db.verify_transaction(&tx).unwrap();
+}

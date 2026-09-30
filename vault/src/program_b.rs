@@ -1,11 +1,10 @@
 //! Program b: pays out a withdrawal batch (design §7).
 //!
 //! Every b output belongs to a node of a split tree. The node's commitment R is
-//! the sha_outputs of the transaction that splits it, so spending b rebuilds the
-//! SIGHASH_ALL message with sha_outputs = R and the Schnorr trick pins every
-//! output. A split has exactly one input (the b); its nLockTime is free and is
-//! the grinding nonce; its fee (the b amount minus the outputs) is fixed by the
-//! tree.
+//! the SHA256 of the serialized outputs of the transaction that splits it (its
+//! sha_outputs): spending b reads all outputs with OP_TX and requires that
+//! hash, which pins every output. A split has exactly one input (the b), so its
+//! fee (the b amount minus the outputs) is fixed by the tree.
 //!
 //! R is read from the parent, in the data output right after the spent b:
 //! - the root b, created by the vault's completion, is followed by
@@ -17,7 +16,7 @@
 //! b has no identity: a b output made by anyone else only pays out that
 //! person's money, and b never merges.
 
-use crate::leaf::{left, op, ops, right, size_eq, substr, MAX_INPUTS, MAX_OUTPUTS, TX_VERSION};
+use crate::leaf::{left, op, ops, right, size_eq, substr, MAX_INPUTS, MAX_OUTPUTS};
 use crate::state::sha256;
 use crate::da::DaData;
 use crate::tx::{input, op_return};
@@ -29,9 +28,12 @@ use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Witness};
 use gsr_gadgets::leaf::V2Tree;
 use gsr_gadgets::parse::{parse_tx, tx_blob, TxParse};
-use gsr_gadgets::pseudo::{cat, drop_n, OP_HINT};
-use gsr_gadgets::schnorr::{schnorr_trick_hints, SchnorrTrickGadget};
-use gsr_gadgets::sighash::{check_compact_prefixed, SighashAllData, SIGHASH_ALL};
+use bitcoin_scriptexec::optx::{
+    COLLATE, INPUT_PREVOUT_AMOUNT, INPUT_PREVOUT_INDEX, INPUT_PREVOUT_SCRIPTPUBKEY, INPUT_PREVOUT_TXID,
+    INPUT_TOTAL_COUNT, SCOPE_CURRENT, SCOPE_NONE,
+};
+use gsr_gadgets::optx::{all_outputs, op_tx};
+use gsr_gadgets::pseudo::{cat, drop_n, push_data, OP_HINT};
 use gsr_gadgets::stack::Stk;
 use gsr_gadgets::Script;
 
@@ -51,49 +53,31 @@ pub enum BLeaf {
     Internal,
 }
 
-/// This input's fields (a split has one input): outpoint, amount, scriptPubKey,
-/// sequence, and the transaction's nLockTime.
+/// The split has exactly one input, this one: its 36-byte outpoint, 8-byte
+/// amount and compact-size-prefixed scriptPubKey.
 fn take_input(s: &mut Stk) {
-    s.gadget(OP_HINT(), 0, &["op"]);
-    size_eq(s, "op", 36);
-    s.gadget(OP_HINT(), 0, &["am"]);
-    size_eq(s, "am", 8);
-    s.gadget(cat(&[OP_HINT(), check_compact_prefixed()]), 0, &["spk"]);
-    s.gadget(OP_HINT(), 0, &["seq"]);
-    size_eq(s, "seq", 4);
-    s.gadget(OP_HINT(), 0, &["lt"]);
-    size_eq(s, "lt", 4);
+    let count = op_tx(COLLATE | INPUT_TOTAL_COUNT, 0, SCOPE_NONE, SCOPE_NONE, 0, 0);
+    s.gadget(cat(&[count, push_data(&1u32.to_le_bytes()), op(OP_EQUALVERIFY)]), 0, &[]);
+    let field = |f| op_tx(COLLATE, 0, SCOPE_CURRENT, SCOPE_NONE, f, 0);
+    s.gadget(field(INPUT_PREVOUT_TXID | INPUT_PREVOUT_INDEX), 0, &["op"]);
+    s.gadget(field(INPUT_PREVOUT_AMOUNT), 0, &["am"]);
+    s.gadget(field(INPUT_PREVOUT_SCRIPTPUBKEY), 0, &["spk"]);
 }
 
-/// Rebuild this input's SIGHASH_ALL message with sha_outputs = R and verify it
-/// with the Schnorr trick; then leave only `OP_1`.
-fn sign_off(s: &mut Stk) {
-    let mut prefix = vec![0x00, SIGHASH_ALL];
-    prefix.extend(TX_VERSION.to_le_bytes());
-    s.push_data(&prefix, "m");
-    s.pick("lt", "_x");
-    s.apply(op(OP_CAT), 2, &["m"]);
-    for f in ["op", "am", "spk", "seq"] {
-        s.pick(f, "_x");
-        s.apply(ops(&[OP_SHA256, OP_CAT]), 2, &["m"]);
-    }
-    s.pick("R", "_x");
-    s.apply(op(OP_CAT), 2, &["m"]);
-    s.push_data(&[0x02, 0, 0, 0, 0], "_x"); // spend type, input index 0
-    s.apply(op(OP_CAT), 2, &["m"]);
-    s.gadget(OP_HINT(), 0, &["_leaf"]); // tapleaf hash
-    size_eq(s, "_leaf", 32);
-    s.apply(op(OP_CAT), 2, &["m"]);
-    s.push_data(&[0x00, 0xff, 0xff, 0xff, 0xff], "_x"); // key version, codesep position
-    s.apply(op(OP_CAT), 2, &["m"]);
-    s.gadget(SchnorrTrickGadget::verify(), 1, &[]);
+/// The outputs are exactly the node's: SHA256(serialized outputs) = R. Then
+/// leave only `OP_1`.
+fn check_outputs(s: &mut Stk) {
+    s.gadget(all_outputs(), 0, &["_outputs"]);
+    s.apply(op(OP_SHA256), 1, &["_h"]);
+    s.pick("R", "_r");
+    s.apply(op(OP_EQUALVERIFY), 2, &[]);
     let left_over = s.names().len();
     s.apply(drop_n(left_over), left_over, &[]);
     s.push(op(OP_PUSHNUM_1), "ok");
 }
 
 /// Spend the root b: the parent is parsed, and R is in the output after the spent one.
-/// Hints: the input's fields, the parent, the tapleaf hash, the two Schnorr-trick hints.
+/// Hint: the parent.
 pub fn root_leaf() -> Script {
     let mut s = Stk::new(&[]);
     take_input(&mut s);
@@ -111,13 +95,13 @@ pub fn root_leaf() -> Script {
     s.push_data(&[0x42, 0x6a, 0x40], "_c");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
     substr(&mut s, "t.out_k", 11, 32, "R");
-    sign_off(&mut s);
+    check_outputs(&mut s);
     s.script()
 }
 
 /// Spend a b created by a split. The parent comes in pieces:
 /// `head || outputs before the spent one || the spent output || its data output || rest`.
-/// Hints: the input's fields, the five pieces, the tapleaf hash, the two Schnorr-trick hints.
+/// Hints: the five pieces.
 pub fn internal_leaf() -> Script {
     let mut s = Stk::new(&[]);
     take_input(&mut s);
@@ -166,7 +150,7 @@ pub fn internal_leaf() -> Script {
     s.apply(op(OP_HASH256), 1, &["_txid"]);
     left(&mut s, "op", 32, "_ptxid");
     s.apply(op(OP_EQUALVERIFY), 2, &[]);
-    sign_off(&mut s);
+    check_outputs(&mut s);
     s.script()
 }
 
@@ -265,60 +249,36 @@ impl ProgramB {
         }
     }
 
-    /// The split of `parent`'s output `vout` into `outputs` with nLockTime `lock_time`, unsigned.
-    pub fn unsigned(parent: &Transaction, vout: usize, outputs: &[TxOut], lock_time: u32) -> Transaction {
+    /// The split of `parent`'s output `vout` into `outputs`, unsigned.
+    pub fn unsigned(parent: &Transaction, vout: usize, outputs: &[TxOut]) -> Transaction {
         Transaction {
             version: Version::TWO,
-            lock_time: LockTime::from_consensus(lock_time),
+            lock_time: LockTime::ZERO,
             input: vec![input(OutPoint::new(parent.compute_txid(), vout as u32))],
             output: outputs.to_vec(),
         }
     }
 
-    /// Witness for spending `parent`'s output `vout` in `tx` with `leaf`, or
-    /// `None` if the Schnorr trick needs another nLockTime.
-    pub fn witness(&self, leaf: BLeaf, tx: &Transaction, parent: &Transaction, vout: usize) -> Option<Witness> {
-        let prevout = parent.output[vout].clone();
-        let data = SighashAllData::new(tx, &[prevout], 0, self.tree.leaf_hash(Self::leaf_index(leaf)));
-        self.witness_from(leaf, &data, parent, vout)
+    /// Witness for spending `parent`'s output `vout` with `leaf`.
+    pub fn witness(&self, leaf: BLeaf, parent: &Transaction, vout: usize) -> Witness {
+        let hints = match leaf {
+            BLeaf::Root => vec![tx_blob(parent)],
+            BLeaf::Internal => pieces(parent, vout),
+        };
+        self.tree.witness(Self::leaf_index(leaf), &hints)
     }
 
-    /// Like [ProgramB::witness], from the signature message data `data` (tests
-    /// pass data whose outputs differ from the transaction's).
-    pub fn witness_from(&self, leaf: BLeaf, data: &SighashAllData, parent: &Transaction, vout: usize) -> Option<Witness> {
-        let i = Self::leaf_index(leaf);
-        let trick = schnorr_trick_hints(&data.preimage()).ok()?;
-        let mut hints = vec![
-            data.outpoints[0].clone(),
-            data.amounts[0].clone(),
-            data.script_pubkeys[0].clone(),
-            data.sequences[0].clone(),
-            data.lock_time.to_le_bytes().to_vec(),
-        ];
-        match leaf {
-            BLeaf::Root => hints.push(tx_blob(parent)),
-            BLeaf::Internal => hints.extend(pieces(parent, vout)),
-        }
-        hints.push(data.tapleaf_hash.to_vec());
-        hints.extend(trick);
-        Some(self.tree.witness(i, &hints))
-    }
-
-    /// Split `parent`'s b output `vout` into `outputs` (its node's outputs),
-    /// choosing the nLockTime so the Schnorr trick applies. The root b's parent
-    /// is the vault's completion (two inputs); any other b's parent is a split.
+    /// Split `parent`'s b output `vout` into `outputs` (its node's outputs).
+    /// The root b's parent is the vault's completion (two inputs); any other
+    /// b's parent is a split.
     pub fn split_tx(&self, parent: &Transaction, vout: usize, outputs: &[TxOut]) -> Transaction {
         let leaf = if parent.input.len() == 1 { BLeaf::Internal } else { BLeaf::Root };
         self.split_with(leaf, parent, vout, outputs)
     }
 
     pub fn split_with(&self, leaf: BLeaf, parent: &Transaction, vout: usize, outputs: &[TxOut]) -> Transaction {
-        (0u32..)
-            .find_map(|lock_time| {
-                let mut tx = Self::unsigned(parent, vout, outputs, lock_time);
-                tx.input[0].witness = self.witness(leaf, &tx, parent, vout)?;
-                Some(tx)
-            })
-            .unwrap()
+        let mut tx = Self::unsigned(parent, vout, outputs);
+        tx.input[0].witness = self.witness(leaf, parent, vout);
+        tx
     }
 }

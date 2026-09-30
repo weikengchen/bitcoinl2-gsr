@@ -18,6 +18,7 @@
   - **限制**：单个栈元素 ≤ 4,000,000B，栈总量 ≤ 8,000,000B，元素个数 ≤ 32,768。
   - **预算**：交易 weight × 10,000。各项开销：哈希 50/字节，签名检查 500,000/次，复制 3/字节，比较 2/字节，算术 6/字节。BIP 440 的常数还会调整。
   - **没有内省 opcode**，内省仍然要用 CAT/Schnorr trick。0xc2 下 CHECKSIG 仍按 BIP342 执行，但 sighash 里的 tapleaf_hash 要按 leaf version 0xc2 计算。
+  - **Update (2026-09-30): the design now also assumes OP_TX** (0xbd in tapscript v2), after objections to reflecting transactions with the Schnorr trick. OP_TX is the third proposal of Rusty Russell and Julian Moik's BIP quartet; it has not been submitted as a BIP. We follow the implementation in jmoik/bitcoin `gsr-full` at `d279905` (a 6-byte selector; it differs from the v0.1.0 draft text) and pass its 76 reference vectors. All covenants read the spending transaction with OP_TX; the parent and grandparent are still reflected by hashing them against the outpoint txids that OP_TX returns.
   - **实现**：`jmoik/bitcoin` 的 `gsr` 分支；bitcoin-inquisition PR #119 尚未合并。
 - **设计按 GSR 的共识限制来做（2026-09-28 已定）**：不按 0xc0 那条 80 字节的 relay 政策设计，测试 signet 必须允许 0xc2 使用大的 witness 元素。80 字节切块的办法（§7）只作为备选。
   - 单笔交易实际可用的空间：
@@ -477,3 +478,4 @@ caboose = OP_RETURN PUSHBYTES_36 <H(state) ‖ LE32(r)>
 - 2026-09-28：L2 账户模型为"地址 + 余额 + nonce"，按编号放在 Merkle 树里，树根 l2_root 放进 vault 的应用状态。DA 公布状态差分（新账户地址 + 变动账户的新余额和新 nonce），不公布交易原文。
 - 2026-09-28：L2 抽象化（用户）。l2_root 对 vault 不透明，只用来把前后两次证明接起来。验证器由其他人实现，这里只定语句（212 字节）并放一个 franking 占位：链下检查通过后，对整笔完成交易签名。
 - 2026-09-29：L2 状态记下"已处理到的 acc"，相邻两次证明处理的历史首尾相接。存款交易采用固定格式；合并 leaf 要求 out1 和付费输入都是原生 segwit；区分存款和合并只看 out1 上的存款标记。
+- 2026-09-30: Transaction introspection moves from the CAT/Schnorr trick to OP_TX (gsr-full `d279905`), at the user's request after objections to the trick. Every leaf now checks the transaction's shape itself (nVersion, exact input and output counts), which the signature message used to pin. Nothing is ground any more: the caboose randomizer r is 0, merges carry no nonce and splits have nLockTime 0.

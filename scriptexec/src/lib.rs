@@ -28,6 +28,7 @@ pub use error::{Error, ExecError};
 
 mod data_structures;
 pub mod v2;
+pub mod optx;
 use crate::data_structures::{ScriptIntError, StackEntry};
 use crate::utils::{read_scriptint_size, scriptint_vec};
 pub use data_structures::Stack;
@@ -154,6 +155,8 @@ pub struct TxTemplate {
     pub prevouts: Vec<TxOut>,
     pub input_idx: usize,
     pub taproot_annex_scriptleaf: Option<(TapLeafHash, Option<Vec<u8>>)>,
+    /// The control block of a taproot script-path spend (OP_TX reads it).
+    pub taproot_control_block: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -291,6 +294,7 @@ pub struct Exec {
     varops_used: u64,
     varops_final_check: u64,
     v2_skip_final_check: bool,
+    v2_immediate_success: bool,
 
     // runtime statistics
     stats: ExecStats,
@@ -407,6 +411,7 @@ impl Exec {
             varops_used: 0,
             varops_final_check: 0,
             v2_skip_final_check: false,
+            v2_immediate_success: false,
             last_codeseparator_pos: None,
             script_code: script,
 
@@ -1279,6 +1284,7 @@ pub fn execute_script_with_witness(script: ScriptBuf, witness: Vec<Vec<u8>>) -> 
             prevouts: vec![],
             input_idx: 0,
             taproot_annex_scriptleaf: Some((TapLeafHash::all_zeros(), None)),
+            taproot_control_block: None,
         },
         script,
         witness,
@@ -1328,6 +1334,7 @@ pub fn get_final_stack(script: ScriptBuf, witness: Vec<Vec<u8>>) -> Vec<Vec<u8>>
             prevouts: vec![],
             input_idx: 0,
             taproot_annex_scriptleaf: Some((TapLeafHash::all_zeros(), None)),
+            taproot_control_block: None,
         },
         script,
         witness,
@@ -1368,6 +1375,7 @@ pub fn execute_script_with_witness_unlimited_stack(
             prevouts: vec![],
             input_idx: 0,
             taproot_annex_scriptleaf: Some((TapLeafHash::all_zeros(), None)),
+            taproot_control_block: None,
         },
         script,
         witness,

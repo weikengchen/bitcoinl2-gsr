@@ -102,6 +102,7 @@ impl P2WSHChecker {
             prevouts: prevouts.to_vec(),
             input_idx,
             taproot_annex_scriptleaf: None,
+            taproot_control_block: None,
         };
 
         let mut exec = Exec::new(
@@ -194,6 +195,7 @@ impl P2TRChecker {
             prevouts: prevouts.to_vec(),
             input_idx,
             taproot_annex_scriptleaf: Some((TapLeafHash::from_script(script, leaf_version), annex)),
+            taproot_control_block: Some(control_block.serialize()),
         };
 
         if leaf_version.to_consensus() == TAPROOT_LEAF_TAPSCRIPT_V2 {

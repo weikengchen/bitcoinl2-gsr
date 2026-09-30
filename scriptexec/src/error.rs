@@ -45,6 +45,8 @@ pub enum ExecError {
     HashOperandSize,
     CleanStack,
     EvalFalse,
+    TxSelector,
+    TxContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

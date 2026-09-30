@@ -11,6 +11,7 @@ use bitcoin::transaction::Transaction;
 use core::cmp::Ordering;
 
 use crate::data_structures::StackEntry;
+use crate::optx;
 use crate::v2::{self, varops};
 use crate::*;
 
@@ -105,6 +106,9 @@ impl Exec {
                     if let Err(err) = self.exec_opcode_v2(op, pos, &mut cost) {
                         return self.failop(err, op);
                     }
+                    if self.v2_immediate_success {
+                        return self.succeed_now();
+                    }
                 }
             }
         }
@@ -117,6 +121,81 @@ impl Exec {
         }
         self.update_stats();
         Ok(())
+    }
+
+    /// Script validation succeeds at once (OP_TX with a future selector version).
+    fn succeed_now(&mut self) -> Result<(), &ExecutionResult> {
+        self.update_stats();
+        self.result = Some(ExecutionResult {
+            success: true,
+            error: None,
+            opcode: None,
+            final_stack: self.stack.clone(),
+            #[cfg(feature = "profiler")]
+            profiler: None,
+        });
+        Err(self.result.as_ref().unwrap())
+    }
+
+    /// OP_TX (see [crate::optx]).
+    fn exec_op_tx(&mut self, cost: &mut u64) -> Result<(), ExecError> {
+        let n = self.stack.len();
+        let top = (1..=n.min(5))
+            .map(|d| self.stack.topstr(-(d as isize)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let stacks = optx::Stacks {
+            len: n,
+            bytes: self.stack.0.iter().map(entry_len).sum(),
+            alt_len: self.altstack.len(),
+            alt_bytes: self.altstack.0.iter().map(entry_len).sum(),
+        };
+        let (leaf_hash, annex) = match &self.tx.taproot_annex_scriptleaf {
+            Some((h, a)) => (Some(h.to_byte_array()), Some(a.as_deref())),
+            None => (None, None),
+        };
+        let control_block = self.tx.taproot_control_block.as_deref();
+        let taptree_root = match (control_block, leaf_hash) {
+            (Some(cb), Some(h)) => optx::Context::taptree_root(cb, h),
+            _ => None,
+        };
+        let ctx = optx::Context {
+            tx: &self.tx.tx,
+            spent_outputs: &self.tx.prevouts,
+            input_index: self.tx.input_idx,
+            annex,
+            tapscript: Some(self.script.as_bytes()),
+            tapleaf_hash: leaf_hash,
+            control_block,
+            taptree_root,
+            codesep_pos: Some(self.last_codeseparator_pos.unwrap_or(u32::MAX)),
+        };
+        let remaining = match self.opt.varops_budget {
+            Some(b) => b.saturating_sub(self.varops_used.saturating_add(self.varops_final_check)),
+            None => u64::MAX,
+        };
+        match optx::eval(&top, &stacks, &ctx, remaining) {
+            Ok(optx::Outcome::ImmediateSuccess) => {
+                self.v2_immediate_success = true;
+                Ok(())
+            }
+            Ok(optx::Outcome::Push { pop, outputs, cost: c }) => {
+                self.stack.popn(pop)?;
+                for o in outputs {
+                    self.stack.pushvec(o);
+                }
+                *cost += c;
+                Ok(())
+            }
+            Err(e) => Err(match e {
+                optx::Error::InvalidStackOperation => ExecError::InvalidStackOperation,
+                optx::Error::Selector => ExecError::TxSelector,
+                optx::Error::Context => ExecError::TxContext,
+                optx::Error::StackSize => ExecError::StackSize,
+                optx::Error::TotalStackSize => ExecError::TotalStackSize,
+                optx::Error::ElementSize => ExecError::StackElementSize,
+                optx::Error::VaropCount => ExecError::VaropCount,
+            }),
+        }
     }
 
     fn finish_v2(&mut self) -> Result<(), &ExecutionResult> {
@@ -150,6 +229,9 @@ impl Exec {
 
     fn exec_opcode_v2(&mut self, op: Opcode, pos: u32, cost: &mut u64) -> Result<(), ExecError> {
         let exec = self.cond_stack.all_true();
+        if op.to_u8() == optx::OP_TX {
+            return self.exec_op_tx(cost);
+        }
 
         match op {
             //
@@ -684,6 +766,7 @@ fn dummy_tx_template() -> TxTemplate {
         prevouts: vec![],
         input_idx: 0,
         taproot_annex_scriptleaf: Some((TapLeafHash::all_zeros(), None)),
+        taproot_control_block: None,
     }
 }
 

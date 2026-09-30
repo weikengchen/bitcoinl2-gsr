@@ -4,14 +4,12 @@
 
 mod common;
 
-use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, WPubkeyHash};
 use bitcoinl2_vault::da::{chain_hash, Change, DaData};
 use bitcoinl2_vault::program_b::{pieces, BLeaf, ProgramB, SplitTree};
 use bitcoinl2_vault::tx::Batch;
 use common::{deposit, rejects, Line, Wallet, World};
-use gsr_gadgets::sighash::SighashAllData;
 
 /// Lock height.
 const H: u32 = 800_000;
@@ -150,23 +148,6 @@ fn tree_is_rebuilt_from_the_published_data() {
     assert_eq!(rebuilt.root().value, x.output[2].value);
 }
 
-/// The strongest attempt to split `parent`'s b output `vout` into `outputs`:
-/// every hint agrees with the node's committed outputs `claimed` (so the
-/// script's message has sha_outputs = R), and only the signature check can fail.
-fn forged(w: &World, parent: &Transaction, vout: usize, outputs: &[TxOut], claimed: &[TxOut]) -> Transaction {
-    let leaf = if parent.input.len() == 1 { BLeaf::Internal } else { BLeaf::Root };
-    let leaf_hash = w.b.tree.leaf_hash(ProgramB::leaf_index(leaf));
-    (0u32..)
-        .find_map(|lock_time| {
-            let mut tx = ProgramB::unsigned(parent, vout, outputs, lock_time);
-            let mut data = SighashAllData::new(&tx, &[parent.output[vout].clone()], 0, leaf_hash);
-            data.outputs = claimed.iter().map(serialize).collect();
-            tx.input[0].witness = w.b.witness_from(leaf, &data, parent, vout)?;
-            Some(tx)
-        })
-        .unwrap()
-}
-
 /// Split rules on the b input, against honest controls.
 #[test]
 fn split_rules() {
@@ -181,20 +162,17 @@ fn split_rules() {
     w.db.verify_transaction(&ok).unwrap();
     let mut outputs = root.outputs.clone();
     outputs[0].value -= Amount::from_sat(1);
-    let tx = forged(&w, &x, 2, &outputs, &root.outputs);
-    rejects(&tx, &prevout(&x, 2), 0, "SchnorrSig");
-    // (hints computed from the transaction itself fail earlier, in the trick)
     let tx = w.b.split_tx(&x, 2, &outputs);
     rejects(&tx, &prevout(&x, 2), 0, "EqualVerify");
     let mut outputs = root.outputs.clone();
     outputs[0].script_pubkey = w.wallet.spk();
-    let tx = forged(&w, &x, 2, &outputs, &root.outputs);
-    rejects(&tx, &prevout(&x, 2), 0, "SchnorrSig");
+    let tx = w.b.split_tx(&x, 2, &outputs);
+    rejects(&tx, &prevout(&x, 2), 0, "EqualVerify");
     // ... with the b as its only input
     let mut tx = ok.clone();
     let (coin, coin_out) = w.fee_coin();
     tx.input.push(bitcoinl2_vault::tx::input(coin));
-    rejects(&tx, &[x.output[2].clone(), coin_out], 0, "SchnorrSig");
+    rejects(&tx, &[x.output[2].clone(), coin_out], 0, "EqualVerify");
     // the root b is not spent as a split's child (its parent has two inputs)
     let tx = w.b.split_with(BLeaf::Internal, &x, 2, &root.outputs);
     rejects(&tx, &prevout(&x, 2), 0, "EqualVerify");
@@ -206,13 +184,13 @@ fn split_rules() {
     w.db.verify_transaction(&ok2).unwrap();
     let mut shifted = ok2.clone();
     let mut items: Vec<Vec<u8>> = shifted.input[0].witness.iter().map(|e| e.to_vec()).collect();
-    items.splice(5..10, pieces(&ok, 0));
+    items.splice(0..5, pieces(&ok, 0));
     shifted.input[0].witness = bitcoin::Witness::from_slice(&items);
     rejects(&shifted, &prevout(&ok, 2), 0, "NumEqualVerify");
     // ... and another node's outputs do not fit it
     let other = &t.nodes[root.children[0]];
-    let tx = forged(&w, &ok, 2, &other.outputs, &child.outputs);
-    rejects(&tx, &prevout(&ok, 2), 0, "SchnorrSig");
+    let tx = w.b.split_tx(&ok, 2, &other.outputs);
+    rejects(&tx, &prevout(&ok, 2), 0, "EqualVerify");
 }
 
 #[test]

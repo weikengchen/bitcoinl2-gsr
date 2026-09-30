@@ -13,8 +13,6 @@ use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use gsr_gadgets::leaf::V2Tree;
 use gsr_gadgets::parse::tx_blob;
-use gsr_gadgets::schnorr::schnorr_trick_hints;
-use gsr_gadgets::sighash::SighashAllData;
 
 pub fn input(prevout: OutPoint) -> TxIn {
     TxIn {
@@ -250,39 +248,29 @@ impl Vault {
         v
     }
 
-    /// The vault input's witness for `tx`, or `None` if the Schnorr trick needs a
-    /// new `r`. A completion carries its franking (the placeholder proof).
-    pub fn vault_witness(&self, plan: &Plan, tx: &Transaction, franking: Option<Vec<u8>>) -> Option<Witness> {
-        let leaf = self.leaf_index(plan.kind);
-        let prevouts = Self::prevouts(plan);
-        let data = SighashAllData::new(tx, &prevouts, 0, self.tree.leaf_hash(leaf));
-        let trick = schnorr_trick_hints(&data.preimage()).ok()?;
+    /// The vault input's witness. A completion carries its franking (the
+    /// placeholder proof).
+    pub fn vault_witness(&self, plan: &Plan, franking: Option<Vec<u8>>) -> Witness {
         let h = &plan.hints;
-        let mut hints = data.hints();
-        hints.extend(trick);
-        hints.extend([h.parent.clone(), h.old_state.clone(), h.old_app.clone()]);
+        let mut hints = vec![h.parent.clone(), h.old_state.clone(), h.old_app.clone()];
         hints.extend(h.extra.iter().cloned());
         hints.extend(franking);
         hints.push(h.grandparent.clone());
-        Some(self.tree.witness(leaf, &hints))
+        self.tree.witness(self.leaf_index(plan.kind), &hints)
     }
 
-    /// Build the transaction, choosing the caboose randomizer r so the Schnorr
-    /// trick applies (spec CAB-3), and fill in the vault input's witness.
-    /// Deposit inputs get their witnesses from `deposit_witness(tx, input_index)`;
-    /// the fee input (last) is left unsigned.
-    pub fn build_with(
-        &self,
-        plan: &Plan,
-        deposit_witness: impl Fn(&Transaction, usize) -> Option<Witness>,
-    ) -> Transaction {
+    /// Build the transaction and fill in the vault input's witness. Deposit
+    /// inputs get their witnesses from `deposit_witness(input_index)`; the fee
+    /// input (last) is left unsigned. The caboose randomizer r is 0: with OP_TX
+    /// nothing needs to be ground.
+    pub fn build_with(&self, plan: &Plan, deposit_witness: impl Fn(usize) -> Witness) -> Transaction {
         self.build_inner(plan, deposit_witness, |_| Ok(None)).expect("nothing to frank")
     }
 
     /// Build a transaction without deposit inputs (see [Vault::build_with]).
     pub fn build(&self, plan: &Plan) -> Transaction {
         assert!(plan.deposits.is_empty(), "use build_with for folds");
-        self.build_with(plan, |_, _| None)
+        self.build_with(plan, |_| unreachable!())
     }
 
     /// Build a completion franked by `franker`, the placeholder for the proof
@@ -293,30 +281,21 @@ impl Vault {
 
     /// Build a completion whose franking is `frank(tx)`.
     pub fn build_complete_with(&self, plan: &Plan, frank: impl Fn(&Transaction) -> Result<Vec<u8>>) -> Result<Transaction> {
-        self.build_inner(plan, |_, _| None, |tx| frank(tx).map(Some))
+        self.build_inner(plan, |_| unreachable!(), |tx| frank(tx).map(Some))
     }
 
     fn build_inner(
         &self,
         plan: &Plan,
-        deposit_witness: impl Fn(&Transaction, usize) -> Option<Witness>,
+        deposit_witness: impl Fn(usize) -> Witness,
         frank: impl Fn(&Transaction) -> Result<Option<Vec<u8>>>,
     ) -> Result<Transaction> {
-        for r in 0u32.. {
-            let mut tx = self.unsigned(plan, r);
-            let Some(mut w) = self.vault_witness(plan, &tx, None) else { continue };
-            let deposits: Option<Vec<Witness>> =
-                (1..=plan.deposits.len()).map(|i| deposit_witness(&tx, i)).collect();
-            let Some(deposits) = deposits else { continue };
-            if let Some(franking) = frank(&tx)? {
-                w = self.vault_witness(plan, &tx, Some(franking)).expect("the trick applies");
-            }
-            tx.input[0].witness = w;
-            for (i, dw) in deposits.into_iter().enumerate() {
-                tx.input[1 + i].witness = dw;
-            }
-            return Ok(tx);
+        let mut tx = self.unsigned(plan, 0);
+        let franking = frank(&tx)?;
+        tx.input[0].witness = self.vault_witness(plan, franking);
+        for i in 1..=plan.deposits.len() {
+            tx.input[i].witness = deposit_witness(i);
         }
-        unreachable!()
+        Ok(tx)
     }
 }

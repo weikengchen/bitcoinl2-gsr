@@ -31,6 +31,7 @@ fn template() -> TxTemplate {
         prevouts: vec![],
         input_idx: 0,
         taproot_annex_scriptleaf: Some((TapLeafHash::all_zeros(), None)),
+        taproot_control_block: None,
     }
 }
 

@@ -248,3 +248,30 @@ fn leaves_have_no_op_success() {
         eprintln!("vault leaf {kind:?}: {} bytes", w.vault.tree.scripts[i].len());
     }
 }
+
+/// OP_TX reads fields by position, so a leaf checks the transaction's shape
+/// itself: nVersion 2, exactly its inputs and exactly its outputs.
+#[test]
+fn exact_shape() {
+    let mut w = World::new(0);
+    let (t0, s0) = w.genesis();
+    let p = w.plan_f(&t0, &s0, &World::app0());
+    let prevouts = bitcoinl2_vault::tx::Vault::prevouts(&p);
+
+    let mut extra_output = w.vault.build(&p);
+    extra_output.output.push(w.wallet.out(1_000));
+    common::rejects(&extra_output, &prevouts, 0, "EqualVerify");
+
+    let mut extra_input = w.vault.build(&p);
+    let (coin, coin_out) = w.fee_coin();
+    extra_input.input.push(input(coin));
+    let mut more = prevouts.clone();
+    more.push(coin_out);
+    common::rejects(&extra_input, &more, 0, "EqualVerify");
+
+    let mut version = w.vault.build(&p);
+    version.version = Version(3);
+    common::rejects(&version, &prevouts, 0, "EqualVerify");
+
+    w.check(&p).unwrap();
+}

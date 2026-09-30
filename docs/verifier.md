@@ -231,7 +231,6 @@ completion leaf's stack.
 
 - Rewards and fee reimbursement rules (per-template byte quotas at a reference fee rate).
 - Chunked DA publication across several steps (the H format already allows it).
-- Transaction introspection: the vault's scripts currently authenticate the
-  spending transaction with the CAT/Schnorr trick. Moving to OP_TX (implemented
-  in jmoik/bitcoin `gsr-full`) is under evaluation; it does not change this
-  interface.
+- The vault's scripts read the spending transaction with OP_TX (jmoik/bitcoin
+  `gsr-full` at `d279905`) since 2026-09-30. The verifier's steps can use it
+  too; it does not change this interface.

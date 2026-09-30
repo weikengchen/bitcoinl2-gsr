@@ -248,6 +248,45 @@
   - 测试里的存款改为每笔交易一笔，按存款格式构造。
 - **全部测试**：workspace 共 59 项，全部通过。
 
+### P7 OP_TX instead of the Schnorr trick — done (2026-09-30)
+
+- **Why**: objections to reflecting transactions with the CAT/Schnorr trick; the
+  user asked to use the community-proposed OP_TX instead.
+- **Reference**: OP_TX as implemented in jmoik/bitcoin `gsr-full` at `d279905`
+  (`src/script/op_tx.cpp`, 76 vectors in `src/test/data/op_tx.json`). Its
+  6-byte selector differs from Rusty Russell's v0.1.0 draft text. That branch
+  also moved to a newer varops model (a fixed charge per opcode); we take over
+  only OP_TX's own charge and keep BIP 440/441 at `8384b7a` for everything else.
+- **scriptexec**: `optx.rs` implements OP_TX; 0xbd is no longer OP_SUCCESS in
+  tapscript v2; a future selector version makes validation succeed at once, as
+  in the reference. `TxTemplate` carries the control block (OP_TX can read it).
+  All 76 reference vectors pass: outputs, varops charges and error kinds.
+- **simulator**: passes the control block; an end-to-end OP_TX covenant test.
+- **gadgets**: `optx.rs` with `TxFieldsGadget`, which reads the same fields the
+  SIGHASH_ALL gadget produced (36-byte outpoints, 8-byte amounts,
+  compact-size-prefixed scriptPubKeys, sequences, serialized outputs, lock
+  time) and first checks nVersion and the exact input and output counts, which
+  the signature message used to pin. The leaves' own logic is unchanged.
+- **vault, program a, program b**: all read the spending transaction with
+  OP_TX. Program b hashes all outputs read with OP_TX and compares with R. No
+  grinding is left: caboose r = 0, no merge nonce, split nLockTime 0. Witnesses
+  no longer carry signature-message hints.
+- **Tests**: 62 in the workspace, all pass. New: exact shape (an extra input, an
+  extra output or nVersion 3 is rejected) for the vault and for merges.
+- **Sizes** (before → after):
+
+  | | Schnorr trick | OP_TX |
+  |---|---|---|
+  | plain transition | 1,076 vB | 918 vB |
+  | lock / completion / timeout | 1,093 / 1,396 / 1,098 vB | 935 / 1,191 / 940 vB |
+  | fold of 1 / 2 / 3 / 4 | 1,560 / 2,106 / 2,726 / 3,383 vB | 1,168 / 1,438 / 1,732 / 2,011 vB |
+  | merge of 2 / 3 / 4 | 865 / 1,315 / 1,841 vB | 493 / 683 / 896 vB |
+  | withdrawals, per payout (256, fan-out 16) | 74 vB | 67 vB |
+  | vault leaf (plain) / a leaf (merge 2) / b leaf (internal) | 2,269 / 615 / 421 B | 1,996 / 319 / 163 B |
+
+  Every covenant input also saves a 500,000-varops CHECKSIG; an OP_TX call
+  costs 1,250 plus 3 per byte read.
+
 ### P6 在真实实现上对照验证（已取消，2026-09-28）
 
 - 用户决定：不安装 inquisition 版的 bitcoind，全部用本地模拟器。模拟器调试起来更方便。

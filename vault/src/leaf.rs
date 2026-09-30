@@ -11,8 +11,7 @@ use bitcoin::script::Builder;
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use gsr_gadgets::parse::{parse_tx, TxParse};
 use gsr_gadgets::pseudo::{cat, drop_n, OP_HINT};
-use gsr_gadgets::schnorr::SchnorrTrickGadget;
-use gsr_gadgets::sighash::SighashAllGadget;
+use gsr_gadgets::optx::TxFieldsGadget;
 use gsr_gadgets::stack::Stk;
 use gsr_gadgets::Script;
 
@@ -189,9 +188,8 @@ pub struct VaultConfig {
 
 /// The vault leaf for one kind.
 ///
-/// Hints, in order: SIGHASH_ALL data of the transaction, the two Schnorr-trick
-/// hints, the parent T, the old state S, the old application state A, the
-/// kind's own hints (a lock: its data; a completion: the new L2 state root and
+/// Hints, in order: the parent T, the old state S, the old application state
+/// A, the kind's own hints (a lock: its data; a completion: the new L2 state root and
 /// parameters, the DA data and the franking), and the grandparent Q.
 /// The new state is not a hint: the leaf builds it and checks that the caboose
 /// commits to it.
@@ -200,11 +198,11 @@ pub fn vault_leaf(kind: Kind, cfg: &VaultConfig) -> Script {
     let caboose = m - 1;
     let mut s = Stk::new(&[]);
 
-    // AUTH-1: authenticate the whole transaction (SIGHASH_ALL, input index 0, version 2).
-    let names = SighashAllGadget::names("x", n, m, false);
+    // AUTH-1: read the spending transaction with OP_TX (version 2, exactly n
+    // inputs and m outputs, this is input 0).
+    let names = TxFieldsGadget::names("x", n, m, false);
     let names: Vec<&str> = names.iter().map(|x| x.as_str()).collect();
-    s.gadget(SighashAllGadget::build(n, m, 0, TX_VERSION), 0, &names);
-    s.gadget(SchnorrTrickGadget::verify(), 1, &[]);
+    s.gadget(TxFieldsGadget::build(n, m, Some(0), TX_VERSION), 0, &names);
 
     // Protocol format (§8.1) and roles (LIN, ROLE, CAB).
     match kind {

@@ -18,7 +18,7 @@ use common::{aggregator_out, deposit, rejects, Line, World, AGGREGATOR};
 fn merge(w: &mut World, a: &ProgramA, inputs: &[(OutPoint, TxOut)]) -> (OutPoint, TxOut) {
     let fee = w.fee_coin();
     let change = w.wallet.out(fee.1.value.to_sat() - 1_000);
-    let mut m = a.merge_tx(inputs, fee.clone(), change, AGGREGATOR);
+    let mut m = a.merge_tx(inputs, fee.0, change, AGGREGATOR);
     w.wallet.sign(&mut m, inputs.len(), &fee.1);
     w.db.verify_transaction(&m).unwrap();
     eprintln!("merge of {} weighs {} WU ({} vB)", inputs.len(), m.weight().to_wu(), m.vsize());
@@ -40,17 +40,12 @@ fn merge_edited(
     let mut prevouts: Vec<TxOut> = inputs.iter().map(|x| x.1.clone()).collect();
     prevouts.push(fee.1.clone());
     let change = w.wallet.out(fee.1.value.to_sat() - 1_000);
-    let mut tx = (0u32..)
-        .find_map(|nonce| {
-            let mut tx = progs[0].merge_unsigned(inputs, fee.0, change.clone(), AGGREGATOR, nonce);
-            edit(&mut tx);
-            for i in shape.a_inputs() {
-                let a = progs.iter().find(|a| a.script_pubkey() == prevouts[i].script_pubkey).unwrap();
-                tx.input[i].witness = a.witness(shape, &tx, &prevouts, i, None)?;
-            }
-            Some(tx)
-        })
-        .unwrap();
+    let mut tx = progs[0].merge_unsigned(inputs, fee.0, change, AGGREGATOR);
+    edit(&mut tx);
+    for i in shape.a_inputs() {
+        let a = progs.iter().find(|a| a.script_pubkey() == prevouts[i].script_pubkey).unwrap();
+        tx.input[i].witness = a.witness(shape, None);
+    }
     if fee.1.script_pubkey == w.wallet.spk() {
         w.wallet.sign(&mut tx, inputs.len(), &fee.1);
     }
@@ -143,6 +138,11 @@ fn merge_rules() {
     let fee = w.fee_coin();
     let (tx, prevouts) = merge_edited(&mut w, &[a], two, fee, |tx| tx.output[1].script_pubkey = a_spk.clone());
     rejects(&tx, &prevouts, 0, "Verify");
+    // exactly three outputs
+    let fee = w.fee_coin();
+    let extra = w.wallet.out(1_000);
+    let (tx, prevouts) = merge_edited(&mut w, &[a], two, fee, |tx| tx.output.push(extra.clone()));
+    rejects(&tx, &prevouts, 0, "EqualVerify");
     // the fee input (last) must not be an a output
     let (tx, prevouts) = merge_edited(&mut w, &[a], two, d[2].clone(), |_| {});
     rejects(&tx, &prevouts, 0, "Verify");
@@ -211,7 +211,7 @@ fn fold_rules() {
     let mut other = plan.new_state;
     other.app_root = [0x33; 32];
     let prevouts = Vault::prevouts(&plan);
-    let mut tx = w.vault.build_with(&plan, |tx, i| line.a.witness(AShape::Fold(1), tx, &prevouts, i, Some(&other)));
+    let mut tx = w.vault.build_with(&plan, |_| line.a.witness(AShape::Fold(1), Some(&other)));
     w.wallet.sign(&mut tx, 2, &plan.fee_prevout);
     rejects(&tx, &prevouts, 1, "EqualVerify");
 }
@@ -227,22 +227,18 @@ fn fold_needs_the_vault() {
     let (fee, fee_out) = w.fee_coin();
     let fake = State { phase: Phase::Active { genesis_id: line.id }, app_root: [0x44; 32] };
     let prevouts = vec![coin_out.clone(), d[0].1.clone(), fee_out.clone()];
-    let mut tx = (0u32..)
-        .find_map(|r| {
-            let tx = Transaction {
-                version: Version::TWO,
-                lock_time: LockTime::ZERO,
-                input: vec![input(coin), input(d[0].0), input(fee)],
-                output: vec![
-                    w.wallet.out(coin_out.value.to_sat() + 10_000),
-                    w.wallet.out(fee_out.value.to_sat() - 1_000),
-                    aggregator_out(),
-                    caboose(&fake, r),
-                ],
-            };
-            line.a.sign(AShape::Fold(1), &tx, &prevouts, Some(&fake))
-        })
-        .unwrap();
+    let tx = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![input(coin), input(d[0].0), input(fee)],
+        output: vec![
+            w.wallet.out(coin_out.value.to_sat() + 10_000),
+            w.wallet.out(fee_out.value.to_sat() - 1_000),
+            aggregator_out(),
+            caboose(&fake, 0),
+        ],
+    };
+    let mut tx = line.a.sign(AShape::Fold(1), &tx, Some(&fake));
     w.wallet.sign(&mut tx, 0, &coin_out);
     w.wallet.sign(&mut tx, 2, &fee_out);
     rejects(&tx, &prevouts, 1, "EqualVerify");

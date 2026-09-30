@@ -105,7 +105,7 @@ pub fn is_op_success(op: u8) -> bool {
         || op == 138 // OP_RESERVED2
         || op == 143 // OP_NEGATE
         || op == 144 // OP_ABS
-        || (187..=254).contains(&op)
+        || ((187..=254).contains(&op) && op != crate::optx::OP_TX)
 }
 
 /// Drop trailing zero bytes.

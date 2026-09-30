@@ -2,8 +2,8 @@
 //!
 //! The address a_L bakes in the L2 id L (the vault's genesis id) and the vault's
 //! scriptPubKey P. a outputs carry no data; the leaves look only at the spending
-//! transaction and may run at any input position (the input index is a hint,
-//! authenticated by the signature check). An a output can only be
+//! transaction (read with OP_TX) and may run at any input position. An a output
+//! can only be
 //! - merged: inputs `[a x j, fee]`, outputs `[a(total), change, aggregator]`;
 //! - folded: inputs `[vault, a x j, fee]`, outputs
 //!   `[vault, change, aggregator OP_RETURN, caboose]`, where the vault's new
@@ -23,8 +23,7 @@ use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Witness};
 use gsr_gadgets::leaf::V2Tree;
 use gsr_gadgets::pseudo::{drop_n, OP_HINT};
-use gsr_gadgets::schnorr::{schnorr_trick_hints, SchnorrTrickGadget};
-use gsr_gadgets::sighash::{SighashAllData, SighashAllGadget};
+use gsr_gadgets::optx::TxFieldsGadget;
 use gsr_gadgets::stack::Stk;
 use gsr_gadgets::Script;
 
@@ -100,15 +99,13 @@ fn pick_indexed(s: &mut Stk, first: &str, index: &str, as_: &str) {
     s.apply(op(OP_PICK), 1, &[as_]);
 }
 
-/// The a_L leaf for one shape. Hints: SIGHASH_ALL data with the input index,
-/// the two Schnorr-trick hints and, for a fold, the vault's new state S'.
+/// The a_L leaf for one shape. Hints: for a fold, the vault's new state S'.
 pub fn a_leaf(shape: AShape, l2_id: &[u8; 32], vault_spk: &ScriptBuf) -> Script {
     let (n, m) = (shape.n_inputs(), shape.n_outputs());
     let mut s = Stk::new(&[]);
-    let names = SighashAllGadget::names("x", n, m, true);
+    let names = TxFieldsGadget::names("x", n, m, true);
     let names: Vec<&str> = names.iter().map(|x| x.as_str()).collect();
-    s.gadget(SighashAllGadget::build_ext(n, m, None, TX_VERSION), 0, &names);
-    s.gadget(SchnorrTrickGadget::verify(), 1, &[]);
+    s.gadget(TxFieldsGadget::build(n, m, None, TX_VERSION), 0, &names);
 
     // self: the scriptPubKey spent by this input, i.e. a_L.
     pick_indexed(&mut s, "x.spk0", "x.index", "self");
@@ -267,47 +264,26 @@ impl ProgramA {
         }
     }
 
-    /// Witness of the a input at `index`, or `None` if the Schnorr trick needs a
-    /// tweak. A fold needs the vault's new state.
-    pub fn witness(
-        &self,
-        shape: AShape,
-        tx: &Transaction,
-        prevouts: &[TxOut],
-        index: usize,
-        new_state: Option<&State>,
-    ) -> Option<Witness> {
-        let leaf = self.leaf_index(shape);
-        let data = SighashAllData::new(tx, prevouts, index, self.tree.leaf_hash(leaf));
-        let mut hints = data.hints_ext(true);
-        hints.extend(schnorr_trick_hints(&data.preimage()).ok()?);
-        hints.extend(new_state.map(|s| s.encode()));
-        Some(self.tree.witness(leaf, &hints))
+    /// Witness of an a input spent with the leaf for `shape`. A fold needs the
+    /// vault's new state.
+    pub fn witness(&self, shape: AShape, new_state: Option<&State>) -> Witness {
+        let hints: Vec<Vec<u8>> = new_state.map(|s| s.encode()).into_iter().collect();
+        self.tree.witness(self.leaf_index(shape), &hints)
     }
 
-    /// `tx` with witnesses on its a inputs (the shape's positions), or `None` if
-    /// some input's Schnorr trick needs a tweak.
-    pub fn sign(&self, shape: AShape, tx: &Transaction, prevouts: &[TxOut], new_state: Option<&State>) -> Option<Transaction> {
+    /// `tx` with witnesses on its a inputs (the shape's positions).
+    pub fn sign(&self, shape: AShape, tx: &Transaction, new_state: Option<&State>) -> Transaction {
         let mut tx = tx.clone();
         for i in shape.a_inputs() {
-            tx.input[i].witness = self.witness(shape, &tx, prevouts, i, new_state)?;
+            tx.input[i].witness = self.witness(shape, new_state);
         }
-        Some(tx)
+        tx
     }
 
     /// The unsigned merge of `inputs` (a outputs) and a fee input into
-    /// `[a(total), change, OP_RETURN(aggregator || nonce)]`.
-    pub fn merge_unsigned(
-        &self,
-        inputs: &[(OutPoint, TxOut)],
-        fee: OutPoint,
-        change: TxOut,
-        aggregator: &[u8],
-        nonce: u32,
-    ) -> Transaction {
+    /// `[a(total), change, OP_RETURN(aggregator)]`.
+    pub fn merge_unsigned(&self, inputs: &[(OutPoint, TxOut)], fee: OutPoint, change: TxOut, aggregator: &[u8]) -> Transaction {
         let total: u64 = inputs.iter().map(|x| x.1.value.to_sat()).sum();
-        let mut data = aggregator.to_vec();
-        data.extend(nonce.to_le_bytes());
         Transaction {
             version: Version::TWO,
             lock_time: LockTime::ZERO,
@@ -315,23 +291,15 @@ impl ProgramA {
             output: vec![
                 TxOut { value: Amount::from_sat(total), script_pubkey: self.script_pubkey() },
                 change,
-                op_return(data),
+                op_return(aggregator.to_vec()),
             ],
         }
     }
 
-    /// The merge with the first nonce for which every a input's Schnorr trick
-    /// applies, with the a inputs' witnesses. The fee input (last) is left unsigned.
-    pub fn merge_tx(&self, inputs: &[(OutPoint, TxOut)], fee: (OutPoint, TxOut), change: TxOut, aggregator: &[u8]) -> Transaction {
-        let shape = AShape::Merge(inputs.len());
-        let mut prevouts: Vec<TxOut> = inputs.iter().map(|x| x.1.clone()).collect();
-        prevouts.push(fee.1);
-        (0u32..)
-            .find_map(|nonce| {
-                let tx = self.merge_unsigned(inputs, fee.0, change.clone(), aggregator, nonce);
-                self.sign(shape, &tx, &prevouts, None)
-            })
-            .unwrap()
+    /// The merge with the a inputs' witnesses. The fee input (last) is left unsigned.
+    pub fn merge_tx(&self, inputs: &[(OutPoint, TxOut)], fee: OutPoint, change: TxOut, aggregator: &[u8]) -> Transaction {
+        let tx = self.merge_unsigned(inputs, fee, change, aggregator);
+        self.sign(AShape::Merge(inputs.len()), &tx, None)
     }
 
     /// Build the fold transaction of `plan` (from [Vault::with_deposits], whose
@@ -339,7 +307,6 @@ impl ProgramA {
     /// every a input. The fee input (last) is left unsigned.
     pub fn fold_tx(&self, vault: &Vault, plan: &Plan) -> Transaction {
         let shape = AShape::Fold(plan.deposits.len());
-        let prevouts = Vault::prevouts(plan);
-        vault.build_with(plan, |tx, i| self.witness(shape, tx, &prevouts, i, Some(&plan.new_state)))
+        vault.build_with(plan, |_| self.witness(shape, Some(&plan.new_state)))
     }
 }

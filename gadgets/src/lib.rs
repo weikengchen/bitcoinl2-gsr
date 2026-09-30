@@ -21,6 +21,7 @@ pub(crate) mod treepp {
 }
 
 pub mod leaf;
+pub mod optx;
 pub mod parse;
 pub mod pseudo;
 pub mod schnorr;
