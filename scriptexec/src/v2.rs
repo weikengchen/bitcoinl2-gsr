@@ -3,7 +3,7 @@
 //! Values are arbitrary-length unsigned little-endian byte strings. Arithmetic
 //! operations normalize their results (no trailing zero bytes); bit and byte
 //! operations do not. Semantics and costs follow the reference implementation
-//! (jmoik/bitcoin `gsr-inquisition`, `src/script/val64.cpp` and `varops.h`).
+//! (jmoik/bitcoin `gsr-full` at d2799052604e, `src/script/val64.cpp` and `varops.h`).
 
 use core::cmp::Ordering;
 use num_bigint::BigUint;
@@ -30,6 +30,37 @@ pub mod varops {
     pub const COST_HASH: u64 = 50;
     pub const BUDGET_PER_WEIGHT_UNIT: u64 = 10_000;
     pub const COST_PER_SIGOP: u64 = BUDGET_PER_WEIGHT_UNIT * 50;
+
+    /// Fixed cost of executing one opcode (jmoik/bitcoin `gsr-full` at
+    /// d279905): at 10,000 budget units per weight unit this caps fixed-cost
+    /// opcode density at eight executions per weight unit.
+    pub const COST_PER_OPCODE: u64 = 1_250;
+
+    /// The fixed cost of `op`, charged before it executes. Pushes are opcodes
+    /// too. Signature opcodes charge it with their signature cost, OP_TX with
+    /// its own.
+    pub fn execution_cost(op: u8) -> u64 {
+        match op {
+            // MUL DIV MOD, RIPEMD160 SHA1 HASH256, 0NOTEQUAL NUMEQUAL NUMEQUALVERIFY
+            // NUMNOTEQUAL LESSTHAN GREATERTHAN LESSTHANOREQUAL GREATERTHANOREQUAL,
+            // BOOLAND BOOLOR WITHIN, EQUALVERIFY, UPSHIFT (LSHIFT) DOWNSHIFT (RSHIFT)
+            0x95 | 0x96 | 0x97 | 0xa6 | 0xa7 | 0xaa | 0x92 | 0x9c | 0x9d | 0x9e | 0x9f | 0xa0 | 0xa1
+            | 0xa2 | 0x9a | 0x9b | 0xa5 | 0x88 | 0x98 | 0x99 => 3_000,
+            // HASH160
+            0xa9 => 4_000,
+            _ => COST_PER_OPCODE,
+        }
+    }
+
+    /// A signature opcode's charge: its fixed cost, plus the rest of
+    /// COST_PER_SIGOP if the signature is not empty.
+    pub fn signature_cost(op: u8, sig_empty: bool) -> u64 {
+        if sig_empty {
+            execution_cost(op)
+        } else {
+            COST_PER_SIGOP
+        }
+    }
 
     /// Transaction-wide budget.
     pub fn tx_budget(weight: u64) -> u64 {

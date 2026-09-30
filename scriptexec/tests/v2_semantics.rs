@@ -79,13 +79,18 @@ fn size_limits() {
 
 #[test]
 fn varops_budget() {
-    // SHA256 of 100 bytes costs 5,000
-    assert_eq!(err(ops(&[OP_SHA256]), vec![vec![0; 100]], Some(4_999)), Some(ExecError::VaropCount));
-    assert_eq!(err(ops(&[OP_SHA256]), vec![vec![0; 100]], Some(5_000)), None);
-    // MUL is charged before the multiplication
-    let mul = 2 * 3 + 8 / 8 * 8 * 27;
+    // SHA256 of 100 bytes costs the fixed 1,250 plus 5,000
+    assert_eq!(err(ops(&[OP_SHA256]), vec![vec![0; 100]], Some(6_249)), Some(ExecError::VaropCount));
+    assert_eq!(err(ops(&[OP_SHA256]), vec![vec![0; 100]], Some(6_250)), None);
+    // the fixed cost is charged before the opcode runs
+    assert_eq!(err(ops(&[OP_SHA256]), vec![vec![0; 100]], Some(1_249)), Some(ExecError::VaropCount));
+    // MUL: fixed 3,000, then its own cost, charged before the multiplication
+    let mul = 3_000 + 2 * 3 + 8 / 8 * 8 * 27;
     assert_eq!(err(ops(&[OP_MUL]), vec![vec![3], vec![4]], Some(mul - 1)), Some(ExecError::VaropCount));
     assert_eq!(eval_tapscript_v2(ops(&[OP_MUL]), vec![vec![3], vec![4]], None).varops_used, mul);
+    // a push is an opcode too
+    let push = ScriptBuf::from_bytes(vec![0x01, 0x07]);
+    assert_eq!(eval_tapscript_v2(push, vec![], None).varops_used, 1_250 + 3);
 }
 
 #[test]

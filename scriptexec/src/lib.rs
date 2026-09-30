@@ -333,13 +333,14 @@ impl Exec {
             }
         }
 
-        // Tapscript v2: OP_SUCCESSx overrides everything, including stack limits,
-        // but a parse error before it fails the script.
+        // Tapscript v2: OP_SUCCESSx overrides everything, including stack limits.
+        // A parse error before it is left to execution, which may reach a
+        // runtime upgrade success (OP_TX) first.
         let mut op_success = false;
         if ctx == ExecCtx::TapscriptV2 {
             for res in script.instructions() {
                 match res {
-                    Err(err) => return Err(Error::InvalidScript(err)),
+                    Err(_) => break,
                     Ok(Instruction::Op(op)) if v2::is_op_success(op.to_u8()) => {
                         op_success = true;
                         break;
@@ -362,13 +363,14 @@ impl Exec {
         }
 
         // We want to make sure the script is valid so we don't have to throw parsing errors
-        // while executing.
-        let instructions = if opt.require_minimal {
+        // while executing (tapscript v2 reports them when execution reaches them, and
+        // checks minimal pushes only for executed pushes).
+        let instructions = if opt.require_minimal && ctx != ExecCtx::TapscriptV2 {
             script.instructions_minimal()
         } else {
             script.instructions()
         };
-        if !op_success {
+        if !op_success && ctx != ExecCtx::TapscriptV2 {
             if let Some(err) = instructions.clone().find_map(|res| res.err()) {
                 return Err(Error::InvalidScript(err));
             }
@@ -382,7 +384,7 @@ impl Exec {
         // We box alocate the script to get a static Instructions iterator.
         // We will manually drop this allocation in the ops::Drop impl.
         let script = Box::leak(script.into_boxed_script()) as &'static Script;
-        let instructions = if opt.require_minimal {
+        let instructions = if opt.require_minimal && ctx != ExecCtx::TapscriptV2 {
             script.instructions_minimal()
         } else {
             script.instructions()

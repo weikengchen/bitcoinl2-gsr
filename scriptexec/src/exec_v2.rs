@@ -1,7 +1,10 @@
 //! Execution of tapscript leaf version 0xc2 (BIP 440 varops, BIP 441 restored script).
 //!
-//! Mirrors `EvalTapscriptV2` and `CheckTapscriptV2ScriptResult` of the reference
-//! implementation (jmoik/bitcoin `gsr-inquisition`, commit 8384b7a).
+//! Mirrors `EvalTapscriptV2Impl` and `CheckTapscriptV2ScriptResult` of the
+//! reference implementation (jmoik/bitcoin `gsr-full`, commit d2799052604e),
+//! including the fixed cost of every executed opcode. Its further opcodes
+//! (OP_DEFINE, OP_INVOKE, OP_TWEAKADD, OP_MULTI, OP_CHECKSIGFROMSTACK,
+//! OP_BYTEREV) are not implemented and stay OP_SUCCESS here.
 
 use bitcoin::hashes::{hash160, ripemd160, sha1, sha256, sha256d, Hash};
 use bitcoin::opcodes::{all::*, Opcode};
@@ -84,7 +87,7 @@ impl Exec {
         let instruction = match self.instructions.next() {
             Some(Ok(i)) => i,
             None => return self.finish_v2(),
-            Some(Err(_)) => unreachable!("we checked the script beforehand"),
+            Some(Err(_)) => return self.fail(ExecError::BadOpcode),
         };
         let pos = self.v2_opcode_pos;
         self.v2_opcode_pos += 1;
@@ -97,12 +100,29 @@ impl Exec {
                     return self.fail(ExecError::PushSize);
                 }
                 if exec {
+                    // a push is an opcode too: its fixed cost first
+                    if let Err(err) = self.spend_varops(varops::COST_PER_OPCODE) {
+                        return self.fail(err);
+                    }
+                    let opcode = self.script.as_bytes()[self.current_position];
+                    if self.opt.require_minimal && !minimal_push(p.as_bytes(), opcode) {
+                        return self.fail(ExecError::MinimalData);
+                    }
+                    cost += p.len() as u64 * varops::COST_COPYING;
                     self.stack.pushstr(p.as_bytes());
                 }
             }
             Instruction::Op(op) => {
                 self.opcode_count += 1;
                 if exec || (op.to_u8() >= OP_IF.to_u8() && op.to_u8() <= OP_ENDIF.to_u8()) {
+                    // the fixed cost is charged before the opcode runs; signature
+                    // opcodes and OP_TX charge it themselves
+                    let own = matches!(op, OP_CHECKSIG | OP_CHECKSIGVERIFY | OP_CHECKSIGADD) || op.to_u8() == optx::OP_TX;
+                    if !own {
+                        if let Err(err) = self.spend_varops(varops::execution_cost(op.to_u8())) {
+                            return self.failop(err, op);
+                        }
+                    }
                     if let Err(err) = self.exec_opcode_v2(op, pos, &mut cost) {
                         return self.failop(err, op);
                     }
@@ -283,7 +303,7 @@ impl Exec {
                 let mut value = false;
                 if exec {
                     if self.stack.is_empty() {
-                        return Err(ExecError::UnbalancedConditional);
+                        return Err(ExecError::InvalidStackOperation);
                     }
                     let top = self.stack.topstr(-1)?;
                     if top.len() > 1 || (top.len() == 1 && top[0] != 1) {
@@ -592,13 +612,10 @@ impl Exec {
             // Crypto
             OP_RIPEMD160 | OP_SHA1 | OP_SHA256 | OP_HASH160 | OP_HASH256 => {
                 let v = self.stack.topstr(-1)?;
-                if op == OP_RIPEMD160 || op == OP_SHA1 {
-                    if v.len() > v2::MAX_LEGACY_HASH_OPERAND_SIZE {
-                        return Err(ExecError::HashOperandSize);
-                    }
-                } else {
-                    *cost += v.len() as u64 * varops::COST_HASH;
+                if (op == OP_RIPEMD160 || op == OP_SHA1) && v.len() > v2::MAX_LEGACY_HASH_OPERAND_SIZE {
+                    return Err(ExecError::HashOperandSize);
                 }
+                *cost += v.len() as u64 * varops::COST_HASH;
                 let h = match op {
                     OP_RIPEMD160 => ripemd160::Hash::hash(&v).to_byte_array().to_vec(),
                     OP_SHA1 => sha1::Hash::hash(&v).to_byte_array().to_vec(),
@@ -618,9 +635,7 @@ impl Exec {
                 self.stack.needn(2)?;
                 let sig = self.stack.topstr(-2)?;
                 let pk = self.stack.topstr(-1)?;
-                if !sig.is_empty() {
-                    self.spend_varops(varops::COST_PER_SIGOP)?;
-                }
+                self.spend_varops(varops::signature_cost(op.to_u8(), sig.is_empty()))?;
                 let res = self.check_sig_tap_v2(&sig, &pk)?;
                 self.stack.popn(2)?;
                 if op == OP_CHECKSIGVERIFY {
@@ -637,7 +652,7 @@ impl Exec {
                 let sig = self.stack.topstr(-3)?;
                 let num_len = self.stack.topstr(-2)?.len();
                 let pk = self.stack.topstr(-1)?;
-                let sigop = if sig.is_empty() { 0 } else { varops::COST_PER_SIGOP };
+                let sigop = varops::signature_cost(op.to_u8(), sig.is_empty());
                 self.spend_varops(sigop + varops::checksigadd_increment(num_len))?;
                 let res = self.check_sig_tap_v2(&sig, &pk)?;
                 self.stack.pop();
@@ -752,6 +767,18 @@ impl Exec {
         }
 
         Ok(())
+    }
+}
+
+/// BIP 62 minimal push: the shortest opcode for `data` (Core's CheckMinimalPush).
+fn minimal_push(data: &[u8], opcode: u8) -> bool {
+    match data.len() {
+        0 => opcode == OP_PUSHBYTES_0.to_u8(),
+        1 if (1..=16).contains(&data[0]) || data[0] == 0x81 => false,
+        n if n <= 75 => opcode as usize == n,
+        n if n <= 255 => opcode == OP_PUSHDATA1.to_u8(),
+        n if n <= 65535 => opcode == OP_PUSHDATA2.to_u8(),
+        _ => true,
     }
 }
 

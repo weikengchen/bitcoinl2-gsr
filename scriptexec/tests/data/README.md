@@ -1,7 +1,8 @@
 Conformance vectors copied verbatim from the BIP 440/441 reference implementation:
-jmoik/bitcoin, commit 8384b7ae0ecf5bc18f8e2af94ef6bc6c8154d80b (branch `gsr-inquisition`),
+jmoik/bitcoin, commit d2799052604e (branch `gsr-full`),
 `src/test/data/tapscript_v2_restored_ops.json` and `src/test/data/tapscript_v2_varops.json`
-(Bitcoin Core, MIT license).
+(Bitcoin Core, MIT license). Until 2026-09-30 they came from commit 8384b7a
+(branch `gsr-inquisition`), which had no fixed per-opcode cost.
 
 `op_tx.json` is copied verbatim from jmoik/bitcoin, commit
 d2799052604e (branch `gsr-full`), `src/test/data/op_tx.json` (Bitcoin Core,

@@ -27,12 +27,12 @@ OP_TX for transaction introspection.
 | `simulator/` | [Bitcoin-Wildlife-Sanctuary/bitcoin-simulator](https://github.com/Bitcoin-Wildlife-Sanctuary/bitcoin-simulator) | `16b73cf` (tag 1.1.0) | MIT |
 
 The first commit touching each directory imports the upstream tree verbatim;
-later commits carry the changes. Tapscript v2 semantics and costs follow the
-BIP 440/441 reference implementation, jmoik/bitcoin `gsr-inquisition` at
-`8384b7a`, whose JSON conformance vectors are copied into
-`scriptexec/tests/data/`. OP_TX (0xbd) follows jmoik/bitcoin `gsr-full` at
-`d279905` (`src/script/op_tx.cpp`), including its fixed per-call cost; its
-reference vectors are copied into the same directory.
+later commits carry the changes. Tapscript v2 semantics and costs, including
+OP_TX (0xbd), follow jmoik/bitcoin `gsr-full` at `d279905`, whose JSON
+conformance vectors (BIP 440/441 and OP_TX) are copied into
+`scriptexec/tests/data/`. The further opcodes of that branch (OP_DEFINE,
+OP_INVOKE, OP_TWEAKADD, OP_MULTI, OP_CHECKSIGFROMSTACK, OP_BYTEREV) are not
+implemented.
 
 ## Test
 

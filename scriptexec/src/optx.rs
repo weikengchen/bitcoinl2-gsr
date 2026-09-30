@@ -3,9 +3,8 @@
 //!
 //! Semantics, encodings, error cases and costs follow jmoik/bitcoin `gsr-full`
 //! at d2799052604e (src/script/op_tx.cpp), whose reference vectors
-//! (tests/data/op_tx.json) pass. That branch also charges a fixed execution
-//! cost per opcode; only OP_TX's charge is taken over here, the other opcodes
-//! keep the costs of the BIP 440/441 reference at 8384b7a.
+//! (tests/data/op_tx.json) pass. Like every opcode, OP_TX pays a fixed
+//! execution cost; it charges it itself, together with its output bytes.
 //!
 //! The selector is 6 bytes: a version byte (non-zero means a future version:
 //! the script succeeds), globals, context, the input and output scopes (one

@@ -8,7 +8,7 @@
 |---|---|---|
 | 脚本执行器 | monorepo 内的 `scriptexec/` | 来自 Bitcoin-Wildlife-Sanctuary/rust-bitcoin-scriptexec 的 `fac1401`（master，比 tag 1.0.0 多 2 个 commit），CC0。原仓库没有测试。 |
 | 账本模拟器 | monorepo 内的 `simulator/` | 来自 Bitcoin-Wildlife-Sanctuary/bitcoin-simulator 的 `16b73cf`（tag 1.1.0），MIT。上游原有 6 个测试，全部通过。 |
-| GSR 参考实现 | `jmoik/bitcoin`，固定在 `8384b7a`（`gsr-inquisition`，即 inquisition PR #119 的 head，2026-06-24） | 相关源码和测试向量复制在 `docs/ref/gsr-ref-8384b7a/` |
+| GSR 参考实现 | `jmoik/bitcoin`，固定在 `8384b7a`（`gsr-inquisition`，即 inquisition PR #119 的 head，2026-06-24）；since 2026-09-30 `d2799052604e` (`gsr-full`, see P8) | 相关源码和测试向量复制在 `docs/ref/gsr-ref-8384b7a/`、`docs/ref/gsr-full-d279905/` |
 | 规范原文 | `docs/ref/bip-0440/0441/0342/0347.mediawiki` | 取自 bitcoin/bips `4f979da` |
 | 公开 GSR signet | gsr-net（`jmoik/bitcoin` 分支 `gsr-net`，2026-09-11） | 2026-09-28 从本机连不上：explorer 和 P2P 都超时。它运行的是 gsr-full，除 BIP 441 外还多了 CSFS/TWEAKADD/BYTEREV/MULTI。 |
 
@@ -286,6 +286,37 @@
 
   Every covenant input also saves a 500,000-varops CHECKSIG; an OP_TX call
   costs 1,250 plus 3 per byte read.
+
+### P8 Tapscript v2 aligned with gsr-full — done (2026-09-30)
+
+- **Reference**: jmoik/bitcoin `gsr-full` at `d2799052604e` replaces
+  `gsr-inquisition` at `8384b7a` for all of tapscript v2 (sources in
+  `docs/ref/gsr-full-d279905/`, local only).
+- **Changes in scriptexec**, from diffing the two evaluators:
+  - every executed opcode, pushes included, pays a fixed cost before it runs:
+    1,250 by default, 3,000 for MUL, DIV, MOD, RIPEMD160, SHA1, HASH256,
+    0NOTEQUAL, the numeric comparisons, BOOLAND, BOOLOR, WITHIN, EQUALVERIFY
+    and the shifts, 4,000 for HASH160;
+  - pushes also pay 3 per byte copied;
+  - RIPEMD160 and SHA1 pay 50 per byte hashed, like the other hashes;
+  - a signature opcode pays its fixed cost, topped up to 500,000 when the
+    signature is not empty;
+  - OP_IF / OP_NOTIF on an empty stack fail with InvalidStackOperation;
+  - a parse error is reported when execution reaches it (it may reach a
+    runtime upgrade success first), and minimal pushes are checked only for
+    executed pushes.
+- **Vectors**: the BIP 440/441 vectors of `gsr-full` (114 restored-op cases,
+  124 varops cases) and the 76 OP_TX vectors all pass.
+- **Not implemented**: `gsr-full`'s further opcodes OP_DEFINE, OP_INVOKE,
+  OP_TWEAKADD, OP_MULTI, OP_CHECKSIGFROMSTACK and OP_BYTEREV stay OP_SUCCESS
+  here. No leaf of ours contains them: `V2Tree` rejects OP_SUCCESS opcodes.
+- **gadgets**: `push_u64(129)` pushes `81 00`, since the minimal push of
+  `[0x81]` is OP_1NEGATE, which is OP_SUCCESS in v2; `V2Tree` now also
+  requires every push to be minimal (policy).
+- **Budget headroom** under the new costs: a plain transition's vault input
+  uses 1.57M varops of its 36.3M budget (4.3%); in a fold of four the vault
+  input uses 2.4% and each a input 0.5%.
+- **Tests**: 62 in the workspace, all pass.
 
 ### P6 在真实实现上对照验证（已取消，2026-09-28）
 

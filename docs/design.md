@@ -479,3 +479,4 @@ caboose = OP_RETURN PUSHBYTES_36 <H(state) ‖ LE32(r)>
 - 2026-09-28：L2 抽象化（用户）。l2_root 对 vault 不透明，只用来把前后两次证明接起来。验证器由其他人实现，这里只定语句（212 字节）并放一个 franking 占位：链下检查通过后，对整笔完成交易签名。
 - 2026-09-29：L2 状态记下"已处理到的 acc"，相邻两次证明处理的历史首尾相接。存款交易采用固定格式；合并 leaf 要求 out1 和付费输入都是原生 segwit；区分存款和合并只看 out1 上的存款标记。
 - 2026-09-30: Transaction introspection moves from the CAT/Schnorr trick to OP_TX (gsr-full `d279905`), at the user's request after objections to the trick. Every leaf now checks the transaction's shape itself (nVersion, exact input and output counts), which the signature message used to pin. Nothing is ground any more: the caboose randomizer r is 0, merges carry no nonce and splits have nLockTime 0.
+- 2026-09-30: Tapscript v2 follows jmoik/bitcoin `gsr-full` at `d279905` in full (costs and semantics), replacing `gsr-inquisition` at `8384b7a`; its extra opcodes (DEFINE, INVOKE, TWEAKADD, MULTI, CHECKSIGFROMSTACK, BYTEREV) are not implemented yet.

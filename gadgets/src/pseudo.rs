@@ -40,9 +40,16 @@ pub fn push_data(data: &[u8]) -> Script {
     b.into_script()
 }
 
-/// Push `n` as a minimal unsigned little-endian number (tapscript v2).
+/// Push `n` as an unsigned little-endian number (tapscript v2): minimal, except
+/// that 129 is pushed as `81 00`, since the minimal push of `[0x81]` would be
+/// OP_1NEGATE, which is OP_SUCCESS in tapscript v2 (numeric opcodes accept the
+/// trailing zero byte).
 pub fn push_u64(n: u64) -> Script {
-    push_data(&bitcoin_scriptexec::v2::from_u64(n))
+    let v = bitcoin_scriptexec::v2::from_u64(n);
+    if v == [0x81] {
+        return push_data(&[0x81, 0x00]);
+    }
+    push_data(&v)
 }
 
 /// Minimal unsigned little-endian encoding of `n`.

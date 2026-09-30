@@ -46,6 +46,10 @@ impl V2Tree {
         }
         for s in &scripts {
             assert_no_op_success(s)?;
+            // every push minimal (policy); a lone 0x81 byte cannot be pushed minimally in v2
+            for ins in s.instructions_minimal() {
+                ins?;
+            }
         }
         let n = scripts.len();
         let d = if n == 1 { 0 } else { (usize::BITS - (n - 1).leading_zeros()) as u8 };
